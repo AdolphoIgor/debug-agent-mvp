@@ -1,29 +1,64 @@
-# Environments
+# Byte-compiled / optimized / DLL files
+__pycache__/
+*.py[cod]
+*$py.class
+
+# C extensions
+*.so
+
+# Distribution / packaging
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
 .env
 .venv
 env/
 venv/
 ENV/
+env.bak/
+venv.bak/
 
-# Python
-__pycache__/
-*.py[cod]
-*$py.class
-*.so
+# Ephemeral runtime and credential overrides
+/tmp/.mvp_env_*.tmp
+/tmp/mvp_orchestrator.lock
 
-# Data
-data/
-datasets/
+# Testing and coverage
+.tox/
+.nox/
+.coverage
+.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.cover
+*.py,cover
+.hypothesis/
+.pytest_cache/
 
-# Models
-models/
-checkpoints/
+# Type checking and linters
+.mypy_cache/
+.ruff_cache/
 
-# IDEs
-.vscode/
+# IDE files
 .idea/
+*.swp
+*.swo
 
-# RUFF
-*.ruff_cache
-
-test_run.log
+# Persistent runtime data
+postgres_data/
+qdrant_data/
