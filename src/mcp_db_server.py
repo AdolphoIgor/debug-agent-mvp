@@ -1,16 +1,21 @@
+from __future__ import annotations
+
 import os
-import uvicorn
+from collections.abc import Generator
 from contextlib import contextmanager
-from mcp.server.fastmcp import FastMCP
+
 import psycopg2
+from mcp.server.fastmcp import FastMCP
 from psycopg2.extras import RealDictCursor
 
-# MCP Server com nome fixo para o showcase
 mcp = FastMCP("MVP-DB-Access")
 
+
 @contextmanager
-def get_db_connection():
-    db_url = os.environ.get("TARGET_DB_URL", "postgresql://:mvp_password@localhost:5432/client_baseline_db")
+def get_db_connection() -> Generator[psycopg2.extensions.connection, None, None]:
+    db_url = os.environ.get(
+        "TARGET_DB_URL", "postgresql://mvp_user:mvp_password@postgres:5432/client_baseline_db"
+    )
     conn = psycopg2.connect(db_url)
     conn.autocommit = True
     try:
@@ -18,31 +23,41 @@ def get_db_connection():
     finally:
         conn.close()
 
+
 @mcp.tool()
 def query_database(sql_query: str) -> str:
     """
-    Executa consultas DQL (somente leitura, como SELECT) no banco de dados do cliente 
-    para inspecionar esquemas, tabelas ou dados associados ao bug reportado.
-    Nao permite operacoes de escrita (INSERT, UPDATE, DELETE).
+    Executes read-only DQL queries (SELECT) on the client database to inspect
+    relational schemas, tables, and data associated with the reported issue.
+    Mutating statements (INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE) are strictly blocked.
     """
     upper_query = sql_query.strip().upper()
-    if any(forbidden in upper_query for forbidden in ["INSERT", "UPDATE", "DELETE", "DROP", "ALTER", "TRUNCATE"]):
-        return "Erro: Acesso negado. Apenas consultas de leitura (SELECT) sao permitidas via MCP."
-    
+    forbidden_tokens = [
+        "INSERT",
+        "UPDATE",
+        "DELETE",
+        "DROP",
+        "ALTER",
+        "TRUNCATE",
+        "GRANT",
+        "REVOKE",
+    ]
+    if any(token in upper_query for token in forbidden_tokens):
+        return "Error: Access denied. Only read-only queries (SELECT) are permitted via MCP."
+
     try:
         with get_db_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(sql_query)
-                results = cur.fetchmany(50)  # Limite rigido para evitar exaustao de tokens
+                results = cur.fetchmany(50)
                 if not results:
-                    return "Consulta executada com sucesso. Nenhum resultado encontrado."
-                
-                # Formatacao otimizada para consumo do LLM
+                    return "Query executed successfully. No records returned."
                 lines = [str(dict(row)) for row in results]
                 return "\n".join(lines)
-    except Exception as e:
-        return f"Falha na execucao da consulta SQL: {str(e)}"
+    except Exception as exc:
+        return f"SQL query execution failed: {str(exc)}"
+
 
 if __name__ == "__main__":
-    # Roda o servidor MCP via Server-Sent Events (SSE) para conexao local do Orquestrador
-    mcp.run(transport='sse', host="0.0.0.0", port=8080)
+    server_port = int(os.environ.get("MCP_SERVER_PORT", "8080"))
+    mcp.run(transport="sse", host="0.0.0.0", port=server_port)
