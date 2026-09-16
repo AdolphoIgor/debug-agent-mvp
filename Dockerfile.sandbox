@@ -1,0 +1,30 @@
+FROM python:3.11-slim
+
+ENV PYTHONUNBUFFERED=1 \
+    PYTHONDONTWRITEBYTECODE=1 \
+    PIP_NO_CACHE_DIR=1
+
+# Install minimal dynamic libraries required by psycopg2 and common C-extensions
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    libpq5 \
+    git \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install test frameworks and database connectors
+RUN pip install --no-cache-dir \
+    pytest>=8.0.0,<9.0.0 \
+    pytest-asyncio>=0.23.0,<1.0.0 \
+    psycopg2-binary>=2.9.9,<3.0.0 \
+    requests>=2.31.0 \
+    httpx>=0.27.0
+
+# Create an unprivileged user for test isolation
+RUN groupadd -g 1000 sandboxgroup && \
+    useradd -u 1000 -g sandboxgroup -s /bin/bash -m sandboxuser
+
+WORKDIR /workspace
+
+USER sandboxuser
+
+ENTRYPOINT ["pytest"]
+CMD ["-q"]
