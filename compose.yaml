@@ -133,10 +133,9 @@ services:
       context: .
       dockerfile: Dockerfile.sandbox
     image: mvp-sandbox:latest
+    pull_policy: build
     restart: "no"
-    entrypoint: [ "echo", "Sandbox image built successfully." ]
-    networks:
-      - mvp_global_net
+    network_mode: none
 
   app:
     build:
