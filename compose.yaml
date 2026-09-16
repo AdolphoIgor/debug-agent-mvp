@@ -69,7 +69,7 @@ services:
         echo 'Operational database already exists.';
       fi;
 
-      echo 'Inspecting relational schema structure in '$$POSTGRES_DB'...'; SCHEMA_INITIALIZED=$$(psql -h $$POSTGRES_HOST -U $$POSTGRES_USER -d $$POSTGRES_DB -tc \"SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'projects'\" | tr -d '[:space:]'); if [ \"$$SCHEMA_INITIALIZED\" != \"1\" ]; then
+      echo 'Inspecting relational schema structure in '$$POSTGRES_DB'...'; SCHEMA_INITIALIZED=$$(psql -h $$POSTGRES_HOST -U $$POSTGRES_USER -d $$POSTGRES_DB -tc \"SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'code_symbols'\" | tr -d '[:space:]'); if [ \"$$SCHEMA_INITIALIZED\" != \"1\" ]; then
         echo 'Relational schema not detected. Applying database/schema.sql...';
         psql -h $$POSTGRES_HOST -U $$POSTGRES_USER -d $$POSTGRES_DB -f /database/schema.sql;
         echo 'Relational schema provisioned successfully.';
@@ -146,6 +146,8 @@ services:
     restart: unless-stopped
     stdin_open: true
     tty: true
+    ports:
+      - "5678:5678"
     depends_on:
       postgres:
         condition: service_healthy
@@ -174,6 +176,7 @@ services:
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       SANDBOX_TIMEOUT_SEC: ${SANDBOX_TIMEOUT_SEC:-120}
       DOCKER_NETWORK_NAME: ${DOCKER_NETWORK_NAME:-mvp_global_net}
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-mvp-sandbox:latest}
     volumes:
       - .:/workspace
       - /var/run/docker.sock:/var/run/docker.sock
