@@ -1,24 +1,8 @@
 {
     "folders": [
         {
-            "name": "Orchestrator",
-            "path": "orchestrator"
-        },
-        {
-            "name": "Raw Data Ingest",
-            "path": "1-raw-data-ingest"
-        },
-        {
-            "name": "Data Prep",
-            "path": "2-data-prep"
-        },
-        {
-            "name": "Model Training",
-            "path": "3-model-training"
-        },
-        {
-            "name": "Model Evaluation",
-            "path": "4-model-eval"
+            "name": "Source",
+            "path": "src"
         }
     ],
     "settings": {
