@@ -1,26 +1,36 @@
 {
-    "name": "debug-agent-mvp",
-    "dockerComposeFile": "../compose.yaml",
-    "service": "debug-agent-mvp-webserver",
-    "workspaceFolder": "/opt/src",
+    "name": "DEBUG-AGENT-MVP DevContainer",
+    "dockerComposeFile": [
+        "../compose.yaml"
+    ],
+    "service": "app",
+    "workspaceFolder": "/workspace",
+    "shutdownAction": "stopCompose",
     "customizations": {
         "vscode": {
             "settings": {
-                "python.defaultInterpreterPath": "/home/airflow/.local/bin/python",
-                "python.analysis.typeCheckingMode": "standard"
+                "python.defaultInterpreterPath": "/usr/local/bin/python",
+                "python.analysis.extraPaths": [
+                    "/workspace/src"
+                ],
+                "python.testing.pytestEnabled": true,
+                "python.testing.unittestEnabled": false,
+                "python.testing.pytestArgs": [
+                    "tests"
+                ],
+                "editor.formatOnSave": true,
+                "[python]": {
+                    "editor.defaultFormatter": "charliermarsh.ruff"
+                }
             },
             "extensions": [
                 "ms-python.python",
                 "ms-python.vscode-pylance",
-                "ms-python.debugpy",
                 "charliermarsh.ruff",
-                "tamasfe.even-better-toml",
-                "redhat.vscode-yaml",
-                "ms-azuretools.vscode-docker"
+                "matangover.mypy",
+                "tamasfe.even-better-toml"
             ]
         }
     },
-    "remoteUser": "langgraph",
-    "updateRemoteUserUID": false,
-    "overrideCommand": false
+    "remoteUser": "root"
 }

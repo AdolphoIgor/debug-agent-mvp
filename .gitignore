@@ -59,6 +59,15 @@ coverage.xml
 *.swp
 *.swo
 
+# Ignore local VS Code caches and user-specific states
+.vscode/*
+
+# Allow only shared team configurations
+!.vscode/extensions.json
+!.vscode/launch.json
+!.vscode/tasks.json
+!.vscode/settings.json
+
 # Persistent runtime data
 postgres_data/
 qdrant_data/

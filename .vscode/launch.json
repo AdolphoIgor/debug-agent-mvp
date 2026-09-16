@@ -2,7 +2,30 @@
   "version": "0.2.0",
   "configurations": [
     {
-      "name": "Python: Attach to Airflow Container",
+      "name": "Python: Debug FastMCP Database Server",
+      "type": "debugpy",
+      "request": "launch",
+      "program": "${workspaceFolder}/src/mcp_db_server.py",
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      }
+    },
+    {
+      "name": "Python: Execute Pytest Suite",
+      "type": "debugpy",
+      "request": "launch",
+      "module": "pytest",
+      "args": ["-q"],
+      "console": "integratedTerminal",
+      "envFile": "${workspaceFolder}/.env",
+      "env": {
+        "PYTHONPATH": "${workspaceFolder}/src"
+      }
+    },
+    {
+      "name": "Python: Remote Container Attach (5678)",
       "type": "debugpy",
       "request": "attach",
       "connect": {
@@ -11,11 +34,10 @@
       },
       "pathMappings": [
         {
-          "localRoot": "${workspaceFolder}/src",
-          "remoteRoot": "/opt/src"
+          "localRoot": "${workspaceFolder}",
+          "remoteRoot": "/workspace"
         }
-      ],
-      "justMyCode": false
+      ]
     }
   ]
 }
