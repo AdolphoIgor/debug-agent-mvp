@@ -1,0 +1,29 @@
+# Environments
+.env
+.venv
+env/
+venv/
+ENV/
+
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+
+# Data
+data/
+datasets/
+
+# Models
+models/
+checkpoints/
+
+# IDEs
+.vscode/
+.idea/
+
+# RUFF
+*.ruff_cache
+
+test_run.log

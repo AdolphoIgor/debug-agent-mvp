@@ -1,0 +1,46 @@
+[project]
+name = "debug-agent-mvp"
+version = "0.1.0"
+description = "A simple show case for debugging with agents"
+requires-python = ">=3.11"
+
+dependencies = [
+    "pytest>=8.0.0",
+    "psycopg2-binary>=2.9.9",
+    "google-genai>=0.8.0",
+    "torch>=2.2.0",
+    "pydantic>=2.6.0",
+    "requests>=2.31.0",
+    "debugpy>=1.8.0",
+]
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[tool.pytest.ini_options]
+# Automatically adds these directories to sys.path during test collection
+testpaths = ["tests"]
+
+[tool.ruff]
+target-version = "py311"
+line-length = 100
+exclude = [".git", ".venv", "__pycache__", "build", "dist"]
+
+[tool.ruff.lint]
+select = [
+    "E",  # pycodestyle errors
+    "F",  # pyflakes
+    "I",  # isort
+    "UP", # pyupgrade
+    "B",  # flake8-bugbear
+]
+
+[tool.uv]
+package = false
+
+[tool.ruff.format]
+quote-style = "double"
+indent-style = "space"
+skip-magic-trailing-comma = false
+line-ending = "auto"

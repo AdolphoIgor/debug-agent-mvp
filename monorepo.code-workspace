@@ -1,0 +1,35 @@
+{
+    "folders": [
+        {
+            "name": "Orchestrator",
+            "path": "orchestrator"
+        },
+        {
+            "name": "Raw Data Ingest",
+            "path": "1-raw-data-ingest"
+        },
+        {
+            "name": "Data Prep",
+            "path": "2-data-prep"
+        },
+        {
+            "name": "Model Training",
+            "path": "3-model-training"
+        },
+        {
+            "name": "Model Evaluation",
+            "path": "4-model-eval"
+        }
+    ],
+    "settings": {
+        "python.analysis.autoSearchPaths": true,
+        "editor.formatOnSave": true,
+        "[python]": {
+            "editor.defaultFormatter": "charliermarsh.ruff",
+            "editor.codeActionsOnSave": {
+                "source.fixAll.ruff": "explicit",
+                "source.organizeImports.ruff": "explicit"
+            }
+        }
+    }
+}

@@ -1,0 +1,26 @@
+{
+    "name": "debug-agent-mvp",
+    "dockerComposeFile": "../compose.yaml",
+    "service": "debug-agent-mvp-webserver",
+    "workspaceFolder": "/opt/src",
+    "customizations": {
+        "vscode": {
+            "settings": {
+                "python.defaultInterpreterPath": "/home/airflow/.local/bin/python",
+                "python.analysis.typeCheckingMode": "basic"
+            },
+            "extensions": [
+                "ms-python.python",
+                "ms-python.vscode-pylance",
+                "ms-python.debugpy",
+                "charliermarsh.ruff",
+                "tamasfe.even-better-toml",
+                "redhat.vscode-yaml",
+                "ms-azuretools.vscode-docker"
+            ]
+        }
+    },
+    "remoteUser": "langgraph",
+    "updateRemoteUserUID": false,
+    "overrideCommand": false
+}
