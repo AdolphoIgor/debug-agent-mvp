@@ -1,310 +1,181 @@
-name: actf-core
-
-# ========================================================================
-# AIRFLOW SHARED CONFIGURATION (Anchor)
-# ========================================================================
-x-airflow-common: &airflow-common
-  build:
-    context: ./orchestrator
-    dockerfile: Dockerfile
-  env_file:
-    - .env
-  environment: &airflow-env
-    AIRFLOW__CORE__EXECUTOR: LocalExecutor
-    AIRFLOW__CORE__LOAD_EXAMPLES: "False"
-    AIRFLOW__LOGGING__LOGGING_LEVEL: INFO
-    AIRFLOW__DATABASE__SQL_ALCHEMY_CONN: postgresql+psycopg2://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/${POSTGRES_DB}
-    AIRFLOW_CONN_AIRFLOW_DB: "postgresql://${POSTGRES_USER}:${POSTGRES_PASSWORD}@postgres-db:5432/${POSTGRES_DB}"
-    AIRFLOW_CONN_SPARK_DEFAULT: '{"conn_type": "spark", "host": "spark://spark-master", "port": 7077}'
-  volumes:
-    - ./orchestrator/dags:/opt/airflow/dags
-    - ./orchestrator/logs:/opt/airflow/logs
-    - ./data:/opt/airflow/data                                
-    - ./tests:/opt/airflow/tests:ro                           
-    - ./1-raw-data-ingest:/opt/airflow/1-raw-data-ingest:ro   
-    - ./2-data-prep:/opt/airflow/2-data-prep:ro               
-    - ./3-model-training:/opt/airflow/3-model-training:ro     
-    - ./4-model-eval:/opt/airflow/4-model-eval:ro             
-  networks:
-    - actf-core-network
-
-# ========================================================================
-# RAY SHARED CONFIGURATION (Anchor)
-# ========================================================================
-x-ray-worker-defaults: &ray-worker-defaults
-  restart: unless-stopped
-  depends_on:
-    ray-head:
-      condition: service_started
-    model-init-download:
-      condition: service_completed_successfully
-  environment:
-    - MINIO_ENDPOINT=http://minio-storage:9000
-    - AWS_ACCESS_KEY_ID=minioadmin
-    - AWS_SECRET_ACCESS_KEY=minioadmin
-    - AWS_DEFAULT_REGION=us-east-1
-  volumes:
-    # Codebase mounts
-    - ./1-raw-data-ingest:/home/ray/workspace/1-raw-data-ingest:ro
-    - ./2-data-prep:/home/ray/workspace/2-data-prep:ro
-    - ./3-model-training:/home/ray/workspace/3-model-training:ro
-    - ./4-model-eval:/home/ray/workspace/4-model-eval:ro
-    # Storage mounts
-    - ./data:/opt/airflow/data:ro
-    - ./models:/opt/models:ro
-  networks:
-    - actf-core-network
-
-services:
-  # ========================================================================
-  # DATA LAYER: Source Relational Database
-  # ========================================================================
-  postgres-db:
-    container_name: actf-core-postgres
-    image: postgres:16-alpine
-    environment:
-      POSTGRES_USER: ${POSTGRES_USER:-db_extraction_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-secure_password_123}
-      POSTGRES_DB: ${POSTGRES_DB:-enterprise_db}
-    ports:
-      - "5432:5432"
-    volumes:
-      - postgres_data:/var/lib/postgresql/data
-    healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-db_extraction_user} -d ${POSTGRES_DB:-enterprise_db}"]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-    networks:
-      - actf-core-network
-
-  # ========================================================================
-  # INIT 1: VOLUME & PERMISSIONS PREP (Lightweight Alpine)
-  # ========================================================================
-  volume-prep-init:
-    image: alpine:latest
-    container_name: actf-core-volume-prep
-    user: "0:0"
-    volumes:
-      - ./orchestrator/logs:/opt/airflow/logs
-      - ./data:/opt/airflow/data
-    command: >
-      sh -c "mkdir -p /opt/airflow/logs /opt/airflow/data && 
-      chown -R 50000:0 /opt/airflow/logs /opt/airflow/data"
-
-  # ========================================================================
-  # INIT 2: MODEL DOWNLOADER
-  # ========================================================================
-  model-init-download:
-    image: alpine:latest
-    container_name: actf-core-model-downloader
-    volumes:
-      - ./models:/opt/models
-    command: >
-      sh -c "
-      echo 'Installing network certificates and curl...' &&
-      apk add --no-cache curl ca-certificates &&
-      echo 'Checking for utility models...' &&
-      if [ ! -f /opt/models/lid.176.bin ]; then 
-        echo 'Downloading lid.176.bin...' && 
-        curl -L -o /opt/models/lid.176.bin https://dl.fbaipublicfiles.com/fasttext/supervised-models/lid.176.bin; 
-      fi &&
-      if [ ! -f /opt/models/starcoder_quality_int8.onnx ]; then
-        echo 'Downloading starcoder ONNX...' &&
-        curl -L -o /opt/models/starcoder_quality_int8.onnx https://huggingface.co/bigcode/starcoder-quality-onnx/resolve/main/model_quantized.onnx;
-      fi &&
-      echo 'Model validation complete.'
-      "
-
-  # ========================================================================
-  # AIRFLOW 1: INIT CONTAINER (The Gold Standard)
-  # ========================================================================
-  airflow-init:
-    <<: *airflow-common
-    container_name: actf-core-airflow-init
-    depends_on:
-      postgres-db:
-        condition: service_healthy
-      volume-prep-init:
-        condition: service_completed_successfully
-    environment:
-      <<: *airflow-env
-      _AIRFLOW_DB_MIGRATE: 'true'
-      _AIRFLOW_WWW_USER_CREATE: 'true'
-      _AIRFLOW_WWW_USER_USERNAME: ${AIRFLOW_ADMIN_USER:-admin}
-      _AIRFLOW_WWW_USER_PASSWORD: ${AIRFLOW_ADMIN_PASSWORD:-admin_secure_password_2026}
-      _AIRFLOW_WWW_USER_FIRSTNAME: Admin
-      _AIRFLOW_WWW_USER_LASTNAME: User
-      _AIRFLOW_WWW_USER_ROLE: Admin
-      _AIRFLOW_WWW_USER_EMAIL: admin@example.com
-    command: version
-
-  # ========================================================================
-  # AIRFLOW 2: RUNTIME WEBSERVER
-  # ========================================================================
-  airflow-webserver:
-    <<: *airflow-common
-    container_name: actf-core-airflow-webserver
-    command: webserver
-    ports:
-      - "8081:8080"
-      - "5678:5678"
-    depends_on:
-      airflow-init:
-        condition: service_completed_successfully
-
-  # ========================================================================
-  # AIRFLOW 3: RUNTIME SCHEDULER
-  # ========================================================================
-  airflow-scheduler:
-    <<: *airflow-common
-    container_name: actf-core-airflow-scheduler
-    command: scheduler
-    depends_on:
-      airflow-init:
-        condition: service_completed_successfully
-
-  # ========================================================================
-  # STORAGE LAYER: Local S3-Compatible Object Storage
-  # ========================================================================
-  minio-storage:
-    image: minio/minio:RELEASE.2024-05-10T01-41-38Z
-    container_name: actf-core-minio
-    ports:
-      - "9000:9000"
-      - "9001:9001"
-    environment:
-      MINIO_ROOT_USER: minioadmin
-      MINIO_ROOT_PASSWORD: minioadmin
-    volumes:
-      - minio_data:/data
-    command: server /data --console-address ":9001"
-    networks:
-      - actf-core-network
-    healthcheck:
-      test: [ "CMD", "curl", "-f", "http://localhost:9000/minio/health/live" ]
-      interval: 5s
-      timeout: 5s
-      retries: 5
-
-  # ========================================================================
-  # COMPUTE LAYER: Apache Spark Distributed Processing Engine
-  # ========================================================================
-  spark-master:
-    build:
-      context: ./1-raw-data-ingest/spark
-      dockerfile: Dockerfile
-    container_name: actf-core-spark-master
-    command: "/opt/spark/bin/spark-class org.apache.spark.deploy.master.Master"
-    ports:
-      - "7077:7077"
-      - "8080:8080"
-    networks:
-      - actf-core-network
-
-  spark-worker:
-    build:
-      context: ./1-raw-data-ingest/spark
-      dockerfile: Dockerfile
-    container_name: actf-core-spark-worker
-    command: "/opt/spark/bin/spark-class org.apache.spark.deploy.worker.Worker spark://spark-master:7077"
-    environment:
-      - SPARK_WORKER_CORES=2
-      - SPARK_WORKER_MEMORY=2g
-    depends_on:
-      - spark-master
-    networks:
-      - actf-core-network
-
-  # ========================================================================
-  # COMPUTE LAYER: Ray Cluster (Unstructured Data & ML)
-  # ========================================================================
-  ray-head:
-    build:
-      context: .
-      dockerfile: Dockerfile.ray-cpu
-    image: actf-core-ray-cpu-image
-    container_name: actf-core-ray-head
-    depends_on:
-      model-init-download:
-        condition: service_completed_successfully
-    ports:
-      - "8265:8265"   
-      - "6379:6379"   
-      - "10001:10001" 
-    command: ray start --head --dashboard-host=0.0.0.0 --port=6379 --num-cpus=0 --block
-    shm_size: 2g
-    volumes:
-      - ./1-raw-data-ingest:/home/ray/workspace/1-raw-data-ingest:ro
-      - ./2-data-prep:/home/ray/workspace/2-data-prep:ro
-      - ./3-model-training:/home/ray/workspace/3-model-training:ro
-      - ./4-model-eval:/home/ray/workspace/4-model-eval:ro
-      - ./data:/opt/airflow/data:ro
-      - ./models:/opt/models:ro
-    networks:
-      - actf-core-network
-
-  # ========================================================================
-  # RAY NODE 1: INGESTION & I/O (CPU)
-  # ========================================================================
-  ray-worker-cpu-io:
-    container_name: actf-core-ray-worker-cpu-io
-    <<: *ray-worker-defaults
-    build:
-      context: .
-      dockerfile: Dockerfile.ray-cpu
-    command: ray start --address=ray-head:6379 --block
-    shm_size: 8g
-
-  # ========================================================================
-  # RAY NODES 2A, 2B, 5: COMPUTE (CPU)
-  # ========================================================================
-  ray-worker-cpu-compute:
-    container_name: actf-core-ray-worker-cpu
-    <<: *ray-worker-defaults
-    build:
-      context: .
-      dockerfile: Dockerfile.ray-cpu
-    image: actf-core-ray-cpu-image
-    command: >
-      ray start 
-      --address=ray-head:6379 
-      --object-store-memory=6442450944 
-      --block
-    shm_size: 8g
-    deploy:
-      resources:
-        limits:
-          cpus: '6'
-          memory: 12G
-
-  # ========================================================================
-  # RAY NODES 3A, 3B, 4: CLASSIFICATION (GPU)
-  # ========================================================================
-  ray-worker-gpu:
-    container_name: actf-core-ray-worker-gpu
-    profiles: ["gpu"]  # ◄ Skipped by default on CPU-only machines!
-    <<: *ray-worker-defaults
-    build:
-      context: .
-      dockerfile: Dockerfile.ray-gpu
-    command: ray start --address=ray-head:6379 --block
-    shm_size: 8g
-    deploy:
-      resources:
-        reservations:
-          devices:
-            - driver: nvidia
-              count: all
-              capabilities: [gpu]
-
 networks:
-  actf-core-network:
-    name: actf-core-network
+  mvp_global_net:
+    name: ${DOCKER_NETWORK_NAME:-mvp_global_net}
     driver: bridge
 
 volumes:
   postgres_data:
-    name: actf-core-postgres-data
-  minio_data:
-    name: actf-core-minio-data
+  qdrant_data:
+
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: mvp_postgres
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-mvp_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mvp_password}
+      POSTGRES_DB: postgres
+    ports:
+      - "${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mvp_user} -d postgres" ]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+      start_period: 5s
+    networks:
+      - mvp_global_net
+
+  db-init:
+    image: postgres:16-alpine
+    container_name: mvp_db_init
+    restart: "no"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    env_file:
+      - .env
+    environment:
+      PGPASSWORD: ${POSTGRES_PASSWORD:-mvp_password}
+      POSTGRES_USER: ${POSTGRES_USER:-mvp_user}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_DB: ${POSTGRES_DB:-mvp_db}
+      BASELINE_DB_NAME: ${BASELINE_DB_NAME:-client_baseline_db}
+    volumes:
+      - ./database:/database:ro
+    networks:
+      - mvp_global_net
+    entrypoint: >
+      /bin/sh -c " set -e; echo 'Waiting for PostgreSQL readiness...'; until pg_isready -h $$POSTGRES_HOST -p 5432 -U $$POSTGRES_USER; do
+        sleep 1;
+      done;
+
+      echo 'Checking existence of baseline database: '$$BASELINE_DB_NAME; EXISTS_BASELINE=$$(psql -h $$POSTGRES_HOST -U $$POSTGRES_USER -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname = '$$BASELINE_DB_NAME'\" | tr -d '[:space:]'); if [ \"$$EXISTS_BASELINE\" != \"1\" ]; then
+        echo 'Creating baseline database for Copy-on-Write cloning...';
+        psql -h $$POSTGRES_HOST -U $$POSTGRES_USER -d postgres -c \"CREATE DATABASE $$BASELINE_DB_NAME;\";
+      else
+        echo 'Baseline database already exists.';
+      fi;
+
+      echo 'Checking existence of operational database: '$$POSTGRES_DB; EXISTS_MVP=$$(psql -h $$POSTGRES_HOST -U $$POSTGRES_USER -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname = '$$POSTGRES_DB'\" | tr -d '[:space:]'); if [ \"$$EXISTS_MVP\" != \"1\" ]; then
+        echo 'Creating operational database: '$$POSTGRES_DB;
+        psql -h $$POSTGRES_HOST -U $$POSTGRES_USER -d postgres -c \"CREATE DATABASE $$POSTGRES_DB;\";
+      else
+        echo 'Operational database already exists.';
+      fi;
+
+      echo 'Inspecting relational schema structure in '$$POSTGRES_DB'...'; SCHEMA_INITIALIZED=$$(psql -h $$POSTGRES_HOST -U $$POSTGRES_USER -d $$POSTGRES_DB -tc \"SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'projects'\" | tr -d '[:space:]'); if [ \"$$SCHEMA_INITIALIZED\" != \"1\" ]; then
+        echo 'Relational schema not detected. Applying database/schema.sql...';
+        psql -h $$POSTGRES_HOST -U $$POSTGRES_USER -d $$POSTGRES_DB -f /database/schema.sql;
+        echo 'Relational schema provisioned successfully.';
+      else
+        echo 'Relational schema already detected. Skipping DDL execution.';
+      fi; "
+
+  qdrant:
+    image: qdrant/qdrant:v1.9.0
+    container_name: mvp_qdrant
+    restart: unless-stopped
+    ports:
+      - "${QDRANT_PORT:-6333}:6333"
+      - "6334:6334"
+    volumes:
+      - qdrant_data:/qdrant/storage
+    healthcheck:
+      test: [ "CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/6333' || exit 1" ]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mvp_global_net
+
+  mcp-server:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mvp_mcp_server
+    restart: unless-stopped
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+    env_file:
+      - .env
+    environment:
+      TARGET_DB_URL: ${TARGET_DB_URL:-postgresql://mvp_user:mvp_password@postgres:5432/client_baseline_db}
+      PYTHONPATH: ${PYTHONPATH:-/workspace/src}
+    command: python src/mcp_db_server.py
+    ports:
+      - "${MCP_SERVER_PORT:-8080}:8080"
+    networks:
+      - mvp_global_net
+
+  record-proxy:
+    image: python:3.11-slim
+    container_name: mvp_record_proxy
+    restart: unless-stopped
+    command: python -c "import http.server, socketserver; handler = http.server.SimpleHTTPRequestHandler; socketserver.TCPServer(('0.0.0.0', 8080), handler).serve_forever()"
+    expose:
+      - "8080"
+    ports:
+      - "${RECORD_PROXY_PORT:-8081}:8080"
+    networks:
+      - mvp_global_net
+
+  sandbox-image:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    image: mvp-sandbox:latest
+    restart: "no"
+    entrypoint: [ "echo", "Sandbox image built successfully." ]
+    networks:
+      - mvp_global_net
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mvp_dev_workspace
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    depends_on:
+      postgres:
+        condition: service_healthy
+      db-init:
+        condition: service_completed_successfully
+      qdrant:
+        condition: service_healthy
+      mcp-server:
+        condition: service_started
+      record-proxy:
+        condition: service_started
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: ${DATABASE_URL:-postgresql://mvp_user:mvp_password@postgres:5432/mvp_db}
+      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
+      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
+      POSTGRES_USER: ${POSTGRES_USER:-mvp_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mvp_password}
+      BASELINE_DB_NAME: ${BASELINE_DB_NAME:-client_baseline_db}
+      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
+      MCP_SERVER_SSE_URL: ${MCP_SERVER_SSE_URL:-http://mcp-server:8080/sse}
+      MVP_RECORD_PLAY_PROXY_URL: ${MVP_RECORD_PLAY_PROXY_URL:-http://record-proxy:8080}
+      PYTHONPATH: ${PYTHONPATH:-/workspace/src}
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-debug-agent-mvp}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      SANDBOX_TIMEOUT_SEC: ${SANDBOX_TIMEOUT_SEC:-120}
+      DOCKER_NETWORK_NAME: ${DOCKER_NETWORK_NAME:-mvp_global_net}
+    volumes:
+      - .:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    networks:
+      - mvp_global_net
