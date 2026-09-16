@@ -1,21 +1,20 @@
 #!/usr/bin/env bash
-set -e
+set -euo pipefail
 
-GREEN='\033[0;32m'
-RED='\033[0;31m'
-NC='\033[0m'
+# Ensure execution occurs from the repository root directory
+REPO_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+cd "${REPO_ROOT}"
 
-echo "================================================="
-echo "        RUNNING actf-core PLATFORM TEST SUITE       "
-echo "================================================="
+echo "Validating execution environment..."
+if command -v pytest >/dev/null 2>&1; then
+    echo "Executing pytest suite directly within the active environment..."
+    PYTHONPATH="${REPO_ROOT}/src" pytest -q "$@"
+elif command -v docker >/dev/null 2>&1; then
+    echo "Executing pytest suite within container: mvp_dev_workspace..."
+    docker compose exec -T app pytest -q "$@"
+else
+    echo "Error: Neither local pytest nor Docker CLI was detected." >&2
+    exit 1
+fi
 
-DOCKER_FLAGS="-i -e PYTHONDONTWRITEBYTECODE=1"
-
-echo -e "\n${GREEN}[1/5] Running Suite Tests...${NC}"
-docker exec $DOCKER_FLAGS debug-agent-mvp \
-  python3 -m pytest -o cache_dir=/tmp/.pytest_cache /opt/src/tests/ -v
-
-
-echo -e "\n${GREEN}================================================="
-echo -e "      ALL TEST SUITES PASSED SUCCESSFULLY!       "
-echo -e "=================================================${NC}\n"
+echo "All tests executed successfully."
