@@ -2,16 +2,21 @@
 name = "debug-agent-mvp"
 version = "0.1.0"
 description = "A simple show case for debugging with agents"
-requires-python = ">=3.11"
+requires-python = ">=3.11,<3.12"
 
 dependencies = [
-    "pytest>=8.0.0",
     "psycopg2-binary>=2.9.9",
     "google-genai>=0.8.0",
     "torch>=2.2.0",
     "pydantic>=2.6.0",
     "requests>=2.31.0",
+]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
     "debugpy>=1.8.0",
+    "ruff>=0.16.8",
 ]
 
 [build-system]
