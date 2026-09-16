@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import fcntl
 import json
 import os
 import re
@@ -17,8 +18,37 @@ from mcp.client.sse import sse_client
 from pydantic import BaseModel, Field
 
 from code_indexer import PythonStructuralIndexer
-from db_pool import DatabasePool
 from sandbox_engine import PythonCoWSandbox
+
+LOCK_FILE_PATH = Path("/tmp/mvp_orchestrator.lock")
+_lock_fd: int | None = None
+
+
+class ExecutionLockManager:
+    @staticmethod
+    def acquire() -> None:
+        global _lock_fd
+        if _lock_fd is None:
+            LOCK_FILE_PATH.parent.mkdir(parents=True, exist_ok=True)
+            _lock_fd = os.open(str(LOCK_FILE_PATH), os.O_CREAT | os.O_RDWR)
+        try:
+            fcntl.flock(_lock_fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+        except (BlockingIOError, OSError) as exc:
+            raise RuntimeError(
+                "Execution rejected: Another active orchestration process holds the global system lock."
+            ) from exc
+
+    @staticmethod
+    def release() -> None:
+        global _lock_fd
+        if _lock_fd is not None:
+            try:
+                fcntl.flock(_lock_fd, fcntl.LOCK_UN)
+                os.close(_lock_fd)
+            except OSError:
+                pass
+            finally:
+                _lock_fd = None
 
 
 class AssistantPatch(BaseModel):
@@ -81,8 +111,6 @@ class OrchestratorState(TypedDict):
     ticket_description: str
     branch_name: str
     workspace_path: str
-    is_duplicate: bool
-    duplicate_of: str | None
     context_data: dict[str, Any]
     current_patch: AssistantPatch | None
     last_audit: AntagonistAudit | None
@@ -97,79 +125,15 @@ class OrchestratorState(TypedDict):
     final_human_approved: bool
 
 
-def node_check_and_lock_ticket(state: OrchestratorState) -> dict[str, Any]:
-    with DatabasePool.get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                SELECT current_status, resolved_ticket_ref 
-                FROM ticket_tracking 
-                WHERE ticket_id = %s FOR UPDATE;
-                """,
-                (state["ticket_id"],),
-            )
-            row = cur.fetchone()
-            if row:
-                status, ref = row[0], row[1]
-                if status == "IN_PROGRESS":
-                    raise RuntimeError(
-                        f"Ticket {state['ticket_id']} is already being actively processed."
-                    )
-                if status == "RESOLVED":
-                    return {"duplicate_of": ref or state["ticket_id"], "is_duplicate": True}
-
-            cur.execute(
-                """
-                INSERT INTO ticket_tracking (
-                    ticket_id, project_id, current_status, assigned_branch,
-                    sanitized_title, sanitized_description
-                ) VALUES (%s, %s, 'IN_PROGRESS', %s, %s, %s)
-                ON CONFLICT (ticket_id) DO UPDATE 
-                SET current_status = 'IN_PROGRESS', updated_at = CURRENT_TIMESTAMP;
-                """,
-                (
-                    state["ticket_id"],
-                    state["project_id"],
-                    state["branch_name"],
-                    state["ticket_title"],
-                    state["ticket_description"],
-                ),
-            )
-        conn.commit()
-    return {"is_duplicate": False, "duplicate_of": None, "accumulated_ignored_restrictions": []}
-
-
-def node_check_semantic_duplicate(state: OrchestratorState) -> dict[str, Any]:
-    if state.get("is_duplicate"):
-        return {}
-    return {"is_duplicate": False}
-
-
-def node_duplicate_hitl_gate(state: OrchestratorState) -> dict[str, Any]:
-    decision = interrupt(
-        {
-            "event": "DUPLICATE_TICKET_DETECTED",
-            "current_ticket_id": state["ticket_id"],
-            "matches_existing_ticket_id": state["duplicate_of"],
-            "prompt": "Similar resolved ticket detected. Close as duplicate and mark resolved?",
-        }
-    )
-
-    if decision.get("confirm_duplicate", False):
-        with DatabasePool.get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    UPDATE ticket_tracking 
-                    SET current_status = 'RESOLVED', resolved_ticket_ref = %s, updated_at = CURRENT_TIMESTAMP
-                    WHERE ticket_id = %s;
-                    """,
-                    (state["duplicate_of"], state["ticket_id"]),
-                )
-            conn.commit()
-        return {"final_human_approved": False, "is_duplicate": True}
-
-    return {"is_duplicate": False}
+def node_acquire_execution_lock(state: OrchestratorState) -> dict[str, Any]:
+    ExecutionLockManager.acquire()
+    return {
+        "accumulated_ignored_restrictions": [],
+        "stagnation_counter": 0,
+        "consultant_cycle_counter": 0,
+        "tests_passed": False,
+        "final_human_approved": False,
+    }
 
 
 def node_git_sync_and_rag(state: OrchestratorState) -> dict[str, Any]:
@@ -211,12 +175,13 @@ def node_git_sync_and_rag(state: OrchestratorState) -> dict[str, Any]:
 
     qdrant_url = os.environ.get("QDRANT_URL", "http://qdrant:6333")
     indexer = PythonStructuralIndexer(qdrant_url=qdrant_url)
+    project_identifier = state.get("project_id", "default_project")
     indexer.sync_project_files(
-        project_id=state["project_id"], repo_dir=ws, files_to_sync=changed_files
+        project_id=project_identifier, repo_dir=ws, files_to_sync=changed_files
     )
 
     context = indexer.query_semantic_bug_sources(
-        project_id=state["project_id"],
+        project_id=project_identifier,
         bug_description=f"{state['ticket_title']}\n{state['ticket_description']}",
     )
     return {"context_data": context}
@@ -274,7 +239,11 @@ Governance-Waived Constraints:
 Generate the patch in unified diff format and an accompanying pytest regression test.
 """
     chat = client.chats.create(
-        model="gemini-1.5-pro", config=types.GenerateContentConfig(temperature=0.1, tools=mcp_tools)
+        model="gemini-1.5-pro",
+        config=types.GenerateContentConfig(
+            temperature=0.1,
+            tools=mcp_tools,
+        ),
     )
 
     response = chat.send_message(prompt)
@@ -298,7 +267,8 @@ Generate the patch in unified diff format and an accompanying pytest regression 
 
                 response = chat.send_message(
                     types.Part.from_function_response(
-                        name="query_database", response={"result": tool_output}
+                        name="query_database",
+                        response={"result": tool_output},
                     )
                 )
 
@@ -306,7 +276,9 @@ Generate the patch in unified diff format and an accompanying pytest regression 
         model="gemini-1.5-pro",
         contents=f"Convert the following solution into strict JSON format:\n{response.text}",
         config=types.GenerateContentConfig(
-            temperature=0.0, response_mime_type="application/json", response_schema=AssistantPatch
+            temperature=0.0,
+            response_mime_type="application/json",
+            response_schema=AssistantPatch,
         ),
     )
     patch = AssistantPatch.model_validate_json(structured_res.text)
@@ -347,7 +319,9 @@ The following restrictions were waived by human governance and MUST NOT trigger 
         model="gemini-1.5-pro",
         contents=prompt,
         config=types.GenerateContentConfig(
-            temperature=0.0, response_mime_type="application/json", response_schema=AntagonistAudit
+            temperature=0.0,
+            response_mime_type="application/json",
+            response_schema=AntagonistAudit,
         ),
     )
     audit = AntagonistAudit.model_validate_json(res.text)
@@ -398,13 +372,7 @@ def node_human_audit_conciliation(state: OrchestratorState) -> dict[str, Any]:
             "stagnation_counter": 5,
         }
     else:
-        with DatabasePool.get_connection() as conn:
-            with conn.cursor() as cur:
-                cur.execute(
-                    "UPDATE ticket_tracking SET current_status = 'FAILED', updated_at = CURRENT_TIMESTAMP WHERE ticket_id = %s",
-                    (state["ticket_id"],),
-                )
-            conn.commit()
+        ExecutionLockManager.release()
         raise RuntimeError("Workflow terminated by human operator during audit conciliation.")
 
 
@@ -464,13 +432,7 @@ def node_consultant_hitl_pause(state: OrchestratorState) -> dict[str, Any]:
             "stagnation_counter": 0,
         }
 
-    with DatabasePool.get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE ticket_tracking SET current_status = 'FAILED', updated_at = CURRENT_TIMESTAMP WHERE ticket_id = %s",
-                (state["ticket_id"],),
-            )
-        conn.commit()
+    ExecutionLockManager.release()
     raise RuntimeError("Workflow terminated by operator after exhausting consultant cycles.")
 
 
@@ -480,7 +442,10 @@ def node_sandbox_execution(state: OrchestratorState) -> dict[str, Any]:
         return {"tests_passed": False, "sandbox_logs": "No patch available for execution."}
 
     ws = Path(state["workspace_path"]).resolve()
-    sandbox = PythonCoWSandbox(workspace_path=ws, ticket_id=state["ticket_id"])
+    sandbox = PythonCoWSandbox(
+        workspace_path=ws,
+        ticket_id=state["ticket_id"],
+    )
 
     try:
         cow_env = sandbox.provision_cow_database()
@@ -537,55 +502,22 @@ def node_final_hitl_inspection(state: OrchestratorState) -> dict[str, Any]:
 
 
 def node_publish_and_index(state: OrchestratorState) -> dict[str, Any]:
-    ws = Path(state["workspace_path"]).resolve()
-    subprocess.run(["git", "add", "-A"], cwd=str(ws), check=True)
-    msg = f"[MVP] Automated fix for ticket {state['ticket_id']}"
-    subprocess.run(["git", "commit", "-m", msg], cwd=str(ws), check=True)
-    subprocess.run(["git", "push", "-u", "origin", state["branch_name"]], cwd=str(ws), check=True)
-
-    with DatabasePool.get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                """
-                UPDATE ticket_tracking 
-                SET current_status = 'RESOLVED', updated_at = CURRENT_TIMESTAMP 
-                WHERE ticket_id = %s;
-                """,
-                (state["ticket_id"],),
-            )
-            cur.execute(
-                """
-                INSERT INTO ticket_semantic_vectors (ticket_id, embedding_id)
-                VALUES (%s, %s)
-                ON CONFLICT (ticket_id) DO NOTHING;
-                """,
-                (state["ticket_id"], f"vec_{state['ticket_id']}"),
-            )
-        conn.commit()
-    return {}
+    try:
+        ws = Path(state["workspace_path"]).resolve()
+        subprocess.run(["git", "add", "-A"], cwd=str(ws), check=True)
+        msg = f"[MVP] Automated fix for ticket {state['ticket_id']}"
+        subprocess.run(["git", "commit", "-m", msg], cwd=str(ws), check=True)
+        subprocess.run(
+            ["git", "push", "-u", "origin", state["branch_name"]], cwd=str(ws), check=True
+        )
+        return {}
+    finally:
+        ExecutionLockManager.release()
 
 
 def node_archive_failure(state: OrchestratorState) -> dict[str, Any]:
-    with DatabasePool.get_connection() as conn:
-        with conn.cursor() as cur:
-            cur.execute(
-                "UPDATE ticket_tracking SET current_status = 'FAILED', updated_at = CURRENT_TIMESTAMP WHERE ticket_id = %s",
-                (state["ticket_id"],),
-            )
-        conn.commit()
+    ExecutionLockManager.release()
     return {}
-
-
-def route_after_duplicate_check(state: OrchestratorState) -> str:
-    if state.get("is_duplicate"):
-        return "node_duplicate_hitl_gate"
-    return "node_git_sync_and_rag"
-
-
-def route_after_duplicate_gate(state: OrchestratorState) -> str:
-    if state.get("is_duplicate"):
-        return END
-    return "node_git_sync_and_rag"
 
 
 def route_after_audit(state: OrchestratorState) -> str:
@@ -635,9 +567,7 @@ def route_after_final_hitl(state: OrchestratorState) -> str:
 def build_mvp_showcase_graph() -> StateGraph:
     workflow = StateGraph(OrchestratorState)
 
-    workflow.add_node("node_check_and_lock_ticket", node_check_and_lock_ticket)
-    workflow.add_node("node_check_semantic_duplicate", node_check_semantic_duplicate)
-    workflow.add_node("node_duplicate_hitl_gate", node_duplicate_hitl_gate)
+    workflow.add_node("node_acquire_execution_lock", node_acquire_execution_lock)
     workflow.add_node("node_git_sync_and_rag", node_git_sync_and_rag)
     workflow.add_node("node_programmer", node_programmer)
     workflow.add_node("node_blind_auditor", node_blind_auditor)
@@ -649,10 +579,8 @@ def build_mvp_showcase_graph() -> StateGraph:
     workflow.add_node("node_publish_and_index", node_publish_and_index)
     workflow.add_node("node_archive_failure", node_archive_failure)
 
-    workflow.add_edge(START, "node_check_and_lock_ticket")
-    workflow.add_edge("node_check_and_lock_ticket", "node_check_semantic_duplicate")
-    workflow.add_conditional_edges("node_check_semantic_duplicate", route_after_duplicate_check)
-    workflow.add_conditional_edges("node_duplicate_hitl_gate", route_after_duplicate_gate)
+    workflow.add_edge(START, "node_acquire_execution_lock")
+    workflow.add_edge("node_acquire_execution_lock", "node_git_sync_and_rag")
     workflow.add_edge("node_git_sync_and_rag", "node_programmer")
 
     workflow.add_edge("node_programmer", "node_blind_auditor")
