@@ -1,36 +1,3 @@
-CREATE TABLE IF NOT EXISTS clients (
-    id VARCHAR(64) PRIMARY KEY,
-    name VARCHAR(255) NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS projects (
-    id VARCHAR(64) PRIMARY KEY,
-    client_id VARCHAR(64) REFERENCES clients(id) ON DELETE CASCADE,
-    repo_path VARCHAR(512) NOT NULL,
-    primary_language VARCHAR(32) NOT NULL,
-    default_branch VARCHAR(64) DEFAULT 'main',
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS ticket_tracking (
-    ticket_id VARCHAR(64) PRIMARY KEY,
-    project_id VARCHAR(64) NOT NULL REFERENCES projects(id) ON DELETE CASCADE,
-    current_status VARCHAR(32) NOT NULL CHECK (current_status IN ('PENDING', 'IN_PROGRESS', 'FAILED', 'RESOLVED')),
-    assigned_branch VARCHAR(255) NOT NULL,
-    sanitized_title TEXT NOT NULL,
-    sanitized_description TEXT NOT NULL,
-    resolved_ticket_ref VARCHAR(64) REFERENCES ticket_tracking(ticket_id),
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP,
-    updated_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE TABLE IF NOT EXISTS ticket_semantic_vectors (
-    ticket_id VARCHAR(64) PRIMARY KEY REFERENCES ticket_tracking(ticket_id) ON DELETE CASCADE,
-    embedding_id VARCHAR(64) NOT NULL,
-    indexed_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
 CREATE TABLE IF NOT EXISTS code_symbols (
     id VARCHAR(255) PRIMARY KEY,
     project_id VARCHAR(64) REFERENCES projects(id) ON DELETE CASCADE,
