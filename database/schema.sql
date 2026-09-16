@@ -1,6 +1,6 @@
 CREATE TABLE IF NOT EXISTS code_symbols (
     id VARCHAR(255) PRIMARY KEY,
-    project_id VARCHAR(64) REFERENCES projects(id) ON DELETE CASCADE,
+    project_id VARCHAR(64) NOT NULL DEFAULT 'default_project',
     file_path VARCHAR(512) NOT NULL,
     symbol_name VARCHAR(255) NOT NULL,
     symbol_type VARCHAR(64) NOT NULL,
@@ -18,22 +18,9 @@ ON code_symbols(project_id, file_path, scope_path, symbol_name, signature_hash);
 CREATE TABLE IF NOT EXISTS code_dependencies (
     caller_symbol_id VARCHAR(255) REFERENCES code_symbols(id) ON DELETE CASCADE,
     callee_symbol_id VARCHAR(255) REFERENCES code_symbols(id) ON DELETE CASCADE,
-    project_id VARCHAR(64) REFERENCES projects(id) ON DELETE CASCADE,
+    project_id VARCHAR(64) NOT NULL DEFAULT 'default_project',
     PRIMARY KEY (caller_symbol_id, callee_symbol_id)
 );
 
-CREATE TABLE IF NOT EXISTS execution_telemetry_logs (
-    id BIGSERIAL PRIMARY KEY,
-    ticket_id VARCHAR(64) REFERENCES ticket_tracking(ticket_id) ON DELETE CASCADE,
-    node_name VARCHAR(64) NOT NULL,
-    stagnation_count INT NOT NULL,
-    consultant_cycle_count INT NOT NULL,
-    action_taken VARCHAR(64) NOT NULL,
-    payload JSONB NOT NULL,
-    created_at TIMESTAMP WITH TIME ZONE DEFAULT CURRENT_TIMESTAMP
-);
-
-CREATE INDEX IF NOT EXISTS idx_ticket_tracking_status ON ticket_tracking(current_status);
-CREATE INDEX IF NOT EXISTS idx_ticket_tracking_project ON ticket_tracking(project_id);
 CREATE INDEX IF NOT EXISTS idx_code_deps_callee ON code_dependencies(callee_symbol_id, project_id);
 CREATE INDEX IF NOT EXISTS idx_code_symbols_lookup ON code_symbols(project_id, file_path);
