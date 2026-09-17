@@ -1,7 +1,9 @@
 from __future__ import annotations
 
+import ctypes
 import hashlib
 import os
+import sys
 import threading
 import uuid
 from dataclasses import dataclass
@@ -13,6 +15,7 @@ from fastembed import TextEmbedding
 from psycopg2.extras import execute_values
 from qdrant_client import QdrantClient
 from qdrant_client.http import models as qmodels
+from tree_sitter import Language, Parser
 
 from db_pool import DatabasePool
 
@@ -46,12 +49,53 @@ class ExtractedSymbol:
     calls: list[str]
 
 
+def _load_python_language() -> Any:
+    try:
+        return tree_sitter_languages.get_language("python")
+    except TypeError:
+        ext = "dll" if sys.platform == "win32" else ("dylib" if sys.platform == "darwin" else "so")
+        pkg_dir = Path(tree_sitter_languages.__file__).parent
+        lib_path = pkg_dir / f"languages.{ext}"
+        if not lib_path.exists():
+            candidates = list(pkg_dir.glob("languages.*"))
+            if candidates:
+                lib_path = candidates[0]
+            else:
+                raise RuntimeError(
+                    f"Compiled tree-sitter shared library could not be located in {pkg_dir}."
+                )
+
+        cdll = ctypes.CDLL(str(lib_path))
+        func = cdll.tree_sitter_python
+        func.restype = ctypes.c_void_p
+        func.argtypes = []
+        lang_ptr = func()
+        return Language(lang_ptr)
+
+
+def _init_python_parser(python_language: Any) -> Parser:
+    try:
+        parser = Parser(python_language)
+    except (TypeError, ValueError):
+        parser = Parser()
+
+    if getattr(parser, "language", None) != python_language:
+        try:
+            parser.language = python_language
+        except (AttributeError, TypeError):
+            if hasattr(parser, "set_language"):
+                parser.set_language(python_language)
+
+    return parser
+
+
 class PythonStructuralIndexer:
     def __init__(self, qdrant_url: str | None = None) -> None:
         target_url = qdrant_url or os.environ.get("QDRANT_URL", "http://qdrant:6333")
         self.qdrant = QdrantClient(url=target_url)
         self.embed_model = EmbeddingModelSingleton.get_model()
-        self.parser = tree_sitter_languages.get_parser("python")
+        self.language = _load_python_language()
+        self.parser = _init_python_parser(self.language)
         self._init_qdrant_collection()
 
     def _init_qdrant_collection(self) -> None:
@@ -59,7 +103,10 @@ class PythonStructuralIndexer:
         if "mvp_codebase" not in collections:
             self.qdrant.create_collection(
                 collection_name="mvp_codebase",
-                vectors_config=qmodels.VectorParams(size=384, distance=qmodels.Distance.COSINE),
+                vectors_config=qmodels.VectorParams(
+                    size=384,
+                    distance=qmodels.Distance.COSINE,
+                ),
             )
             self.qdrant.create_payload_index(
                 collection_name="mvp_codebase",
@@ -165,10 +212,12 @@ class PythonStructuralIndexer:
                     filter=qmodels.Filter(
                         must=[
                             qmodels.FieldCondition(
-                                key="project_id", match=qmodels.MatchValue(value=project_id)
+                                key="project_id",
+                                match=qmodels.MatchValue(value=project_id),
                             ),
                             qmodels.FieldCondition(
-                                key="file_path", match=qmodels.MatchValue(value=rel_path)
+                                key="file_path",
+                                match=qmodels.MatchValue(value=rel_path),
                             ),
                         ]
                     )
@@ -194,7 +243,7 @@ class PythonStructuralIndexer:
                 )
 
                 cur.execute(
-                    "DELETE FROM code_symbols WHERE project_id = %s AND file_path = ANY(%s)",
+                    "DELETE FROM code_symbols WHERE project_id = %s AND file_path = ANY(%s);",
                     (project_id, files_to_sync),
                 )
 
@@ -226,7 +275,8 @@ class PythonStructuralIndexer:
                             scope_path = EXCLUDED.scope_path,
                             start_line = EXCLUDED.start_line,
                             end_line = EXCLUDED.end_line,
-                            content_hash = EXCLUDED.content_hash;
+                            content_hash = EXCLUDED.content_hash,
+                            updated_at = CURRENT_TIMESTAMP;
                         """,
                         symbol_rows,
                     )

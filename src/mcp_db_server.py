@@ -24,16 +24,15 @@ FORBIDDEN_SQL_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b(REVOKE)\b", re.IGNORECASE),
     re.compile(r"\b(EXECUTE)\b", re.IGNORECASE),
     re.compile(r"\b(CALL)\b", re.IGNORECASE),
+    re.compile(r"\b(pg_terminate_backend|pg_cancel_backend)\b", re.IGNORECASE),
 ]
 
 
 class DatabaseAccessError(Exception):
-    """Raised when a database interaction fails."""
     pass
 
 
 class UnauthorizedQueryError(Exception):
-    """Raised when non-DQL or mutating SQL statements are detected."""
     pass
 
 
@@ -41,7 +40,7 @@ class UnauthorizedQueryError(Exception):
 def get_db_connection() -> Generator[PgConnection, None, None]:
     db_url: str = os.environ.get(
         "TARGET_DB_URL",
-        "postgresql://mvp_user:mvp_password@postgres:5432/client_baseline_db"
+        "postgresql://mvp_user:mvp_password@postgres:5432/mvp_db",
     )
     conn: PgConnection | None = None
     try:
@@ -49,7 +48,9 @@ def get_db_connection() -> Generator[PgConnection, None, None]:
         conn.autocommit = True
         yield conn
     except psycopg2.Error as exc:
-        raise DatabaseAccessError(f"Database connection could not be established: {str(exc)}") from exc
+        raise DatabaseAccessError(
+            f"Database connection could not be established: {str(exc)}"
+        ) from exc
     finally:
         if conn is not None and not conn.closed:
             conn.close()
@@ -60,7 +61,6 @@ def validate_dql_query(sql_query: str) -> None:
     if not sanitized:
         raise UnauthorizedQueryError("Query execution rejected: SQL string is empty.")
 
-    # Validate that execution begins with a valid read operation
     if not re.match(r"^(SELECT|WITH|EXPLAIN)\b", sanitized, re.IGNORECASE):
         raise UnauthorizedQueryError(
             "Query execution rejected: Only read-only statements (SELECT, WITH, EXPLAIN) are permitted."
@@ -75,10 +75,6 @@ def validate_dql_query(sql_query: str) -> None:
 
 @mcp.tool()
 def query_database(sql_query: str) -> str:
-    """Executes read-only SQL queries on the client database to inspect schemas and data.
-
-    Mutating commands (INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE) are forbidden.
-    """
     try:
         validate_dql_query(sql_query)
         with get_db_connection() as conn:
