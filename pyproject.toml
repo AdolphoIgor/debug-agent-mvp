@@ -23,6 +23,7 @@ dependencies = [
     "tree-sitter-languages>=1.10.0,<2.0.0",
     "mcp[cli]>=1.0.0,<2.0.0",
     "httpx>=0.27.0,<1.0.0",
+    "python-dotenv>=1.0.0",
 ]
 
 [dependency-groups]
@@ -38,7 +39,17 @@ dev = [
 packages = ["src"]
 
 [tool.pytest.ini_options]
+minversion = "8.0"
+addopts = "-q -ra --strict-markers --disable-warnings"
 testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_classes = ["Test*"]
+python_functions = ["test_*"]
+pythonpath = [".", "src"]
+filterwarnings = [
+    "ignore::DeprecationWarning",
+    "ignore::UserWarning",
+]
 
 [tool.ruff]
 line-length = 100
