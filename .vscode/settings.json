@@ -1,7 +1,8 @@
 {
     "python.defaultInterpreterPath": "/usr/local/bin/python",
     "python.analysis.extraPaths": [
-        "${workspaceFolder}/src"
+        "${workspaceFolder}/src",
+        "${workspaceFolder}/tests"
     ],
     "python.analysis.typeCheckingMode": "strict",
     "python.testing.pytestEnabled": true,
@@ -9,13 +10,19 @@
     "python.testing.pytestArgs": [
         "tests"
     ],
-    "ruff.enable": true,
-    "ruff.organizeImports": true,
     "mypy.runUsingActiveInterpreter": true,
     "files.exclude": {
         "**/__pycache__": true,
         "**/.pytest_cache": true,
         "**/.ruff_cache": true,
         "**/.mypy_cache": true
+    },
+    "editor.formatOnSave": true,
+    "[python]": {
+        "editor.defaultFormatter": "charliermarsh.ruff",
+        "editor.codeActionsOnSave": {
+            "source.fixAll.ruff": "always",
+            "source.organizeImports.ruff": "always"
+        }
     }
 }
