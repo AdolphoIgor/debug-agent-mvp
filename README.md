@@ -139,27 +139,13 @@ Replaces naive sliding-window text chunking with context-aware semantic indexing
 
 | Domain | Technology / Specification | Rationale |
 | --- | --- | --- |
-| **Language Runtime** | Python 3.11 | High performance, modern typing support, native async primitives.
-
- |
-| **Package Management** | `uv` (Astral) | Sub-second deterministic resolution and lockfile synchronization (`uv.lock`).
-
- |
-| **Agent Orchestration** | LangGraph / LangChain | Stateful, multi-actor cyclic graphs with typed checkpoints and conditional routing.
-
- |
-| **LLM Inference** | Google GenAI SDK (`google-genai`) | Native integration with Gemini models and dynamic quota pool management.
-
- |
-| **Tool Protocol** | Model Context Protocol (MCP) | Vendor-agnostic, enterprise-standard schema for AI tool invocation.
-
- |
-| **Database & Vectors** | PostgreSQL 16 & Qdrant | Hybrid relational schema and fast vector similarity indexing.
-
- |
-| **Isolation Barrier** | Docker Compose / Docker API | Hard sandbox isolation preventing host pollution during dynamic code execution.
-
- |
+| **Language Runtime** | Python 3.11 | High performance, modern typing support, native async primitives.|
+| **Package Management** | `uv` (Astral) | Sub-second deterministic resolution and lockfile synchronization (`uv.lock`).|
+| **Agent Orchestration** | LangGraph / LangChain | Stateful, multi-actor cyclic graphs with typed checkpoints and conditional routing.|
+| **LLM Inference** | Google GenAI SDK (`google-genai`) | Native integration with Gemini models and dynamic quota pool management.|
+| **Tool Protocol** | Model Context Protocol (MCP) | Vendor-agnostic, enterprise-standard schema for AI tool invocation.|
+| **Database & Vectors** | PostgreSQL 16 & Qdrant | Hybrid relational schema and fast vector similarity indexing.|
+| **Isolation Barrier** | Docker Compose / Docker API | Hard sandbox isolation preventing host pollution during dynamic code execution.|
 
 ## Directory Structure
 

@@ -17,65 +17,20 @@ services:
     environment:
       POSTGRES_USER: ${POSTGRES_USER:-mvp_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mvp_password}
-      POSTGRES_DB: postgres
+      POSTGRES_DB: ${POSTGRES_DB:-mvp_db}
     ports:
       - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mvp_user} -d postgres" ]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mvp_user} -d ${POSTGRES_DB:-mvp_db}" ]
       interval: 5s
       timeout: 5s
       retries: 10
       start_period: 5s
     networks:
       - mvp_global_net
-
-  db-init:
-    image: postgres:16-alpine
-    container_name: mvp_db_init
-    restart: "no"
-    depends_on:
-      postgres:
-        condition: service_healthy
-    env_file:
-      - .env
-    environment:
-      PGPASSWORD: ${POSTGRES_PASSWORD:-mvp_password}
-      POSTGRES_USER: ${POSTGRES_USER:-mvp_user}
-      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
-      POSTGRES_DB: ${POSTGRES_DB:-mvp_db}
-      BASELINE_DB_NAME: ${BASELINE_DB_NAME:-client_baseline_db}
-    volumes:
-      - ./database:/database:ro
-    networks:
-      - mvp_global_net
-    entrypoint: >
-      /bin/sh -c " set -e; echo 'Waiting for PostgreSQL readiness...'; until pg_isready -h $$POSTGRES_HOST -p 5432 -U $$POSTGRES_USER; do
-        sleep 1;
-      done;
-
-      echo 'Checking existence of baseline database: '$$BASELINE_DB_NAME; EXISTS_BASELINE=$$(psql -h $$POSTGRES_HOST -U $$POSTGRES_USER -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname = '$$BASELINE_DB_NAME'\" | tr -d '[:space:]'); if [ \"$$EXISTS_BASELINE\" != \"1\" ]; then
-        echo 'Creating baseline database for Copy-on-Write cloning...';
-        psql -h $$POSTGRES_HOST -U $$POSTGRES_USER -d postgres -c \"CREATE DATABASE $$BASELINE_DB_NAME;\";
-      else
-        echo 'Baseline database already exists.';
-      fi;
-
-      echo 'Checking existence of operational database: '$$POSTGRES_DB; EXISTS_MVP=$$(psql -h $$POSTGRES_HOST -U $$POSTGRES_USER -d postgres -tc \"SELECT 1 FROM pg_database WHERE datname = '$$POSTGRES_DB'\" | tr -d '[:space:]'); if [ \"$$EXISTS_MVP\" != \"1\" ]; then
-        echo 'Creating operational database: '$$POSTGRES_DB;
-        psql -h $$POSTGRES_HOST -U $$POSTGRES_USER -d postgres -c \"CREATE DATABASE $$POSTGRES_DB;\";
-      else
-        echo 'Operational database already exists.';
-      fi;
-
-      echo 'Inspecting relational schema structure in '$$POSTGRES_DB'...'; SCHEMA_INITIALIZED=$$(psql -h $$POSTGRES_HOST -U $$POSTGRES_USER -d $$POSTGRES_DB -tc \"SELECT 1 FROM information_schema.tables WHERE table_schema = 'public' AND table_name = 'code_symbols'\" | tr -d '[:space:]'); if [ \"$$SCHEMA_INITIALIZED\" != \"1\" ]; then
-        echo 'Relational schema not detected. Applying database/schema.sql...';
-        psql -h $$POSTGRES_HOST -U $$POSTGRES_USER -d $$POSTGRES_DB -f /database/schema.sql;
-        echo 'Relational schema provisioned successfully.';
-      else
-        echo 'Relational schema already detected. Skipping DDL execution.';
-      fi; "
 
   qdrant:
     image: qdrant/qdrant:v1.9.0
@@ -100,28 +55,18 @@ services:
       dockerfile: Dockerfile
     image: mvp-mcp-server:latest
     pull_policy: build
+    container_name: mvp_mcp_server
+    restart: unless-stopped
     ports:
-      - "8080:8080"
+      - "${MCP_SERVER_HOST_PORT:-8081}:8080"
     environment:
-      - TARGET_DB_URL=postgresql://mvp_user:mvp_password@postgres:5432/client_baseline_db
+      - TARGET_DB_URL=postgresql://${POSTGRES_USER:-mvp_user}:${POSTGRES_PASSWORD:-mvp_password}@postgres:5432/${POSTGRES_DB:-mvp_db}
       - PYTHONUNBUFFERED=1
     networks:
       - mvp_global_net
     depends_on:
       postgres:
         condition: service_healthy
-
-  record-proxy:
-    image: python:3.11-slim
-    container_name: mvp_record_proxy
-    restart: unless-stopped
-    command: python -c "import http.server, socketserver; handler = http.server.SimpleHTTPRequestHandler; socketserver.TCPServer(('0.0.0.0', 8080), handler).serve_forever()"
-    expose:
-      - "8080"
-    ports:
-      - "${RECORD_PROXY_PORT:-8081}:8080"
-    networks:
-      - mvp_global_net
 
   sandbox-image:
     build:
@@ -136,6 +81,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: mvp-app:latest
     container_name: mvp_dev_workspace
     restart: unless-stopped
     stdin_open: true
@@ -145,31 +91,26 @@ services:
     depends_on:
       postgres:
         condition: service_healthy
-      db-init:
-        condition: service_completed_successfully
       qdrant:
         condition: service_healthy
       mcp-server:
         condition: service_started
-      record-proxy:
-        condition: service_started
     env_file:
       - .env
     environment:
-      DATABASE_URL: ${DATABASE_URL:-postgresql://mvp_user:mvp_password@postgres:5432/mvp_db}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-mvp_user}:${POSTGRES_PASSWORD:-mvp_password}@postgres:5432/${POSTGRES_DB:-mvp_db}
       POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
       POSTGRES_PORT: ${POSTGRES_PORT:-5432}
       POSTGRES_USER: ${POSTGRES_USER:-mvp_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mvp_password}
-      BASELINE_DB_NAME: ${BASELINE_DB_NAME:-client_baseline_db}
+      POSTGRES_DB: ${POSTGRES_DB:-mvp_db}
       QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
       MCP_SERVER_SSE_URL: ${MCP_SERVER_SSE_URL:-http://mcp-server:8080/sse}
-      MVP_RECORD_PLAY_PROXY_URL: ${MVP_RECORD_PLAY_PROXY_URL:-http://record-proxy:8080}
-      PYTHONPATH: ${PYTHONPATH:-/workspace/src}
+      PYTHONPATH: ${PYTHONPATH:-/workspace:/workspace/src}
       GCP_PROJECT_ID: ${GCP_PROJECT_ID:-debug-agent-mvp}
+      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
       SANDBOX_TIMEOUT_SEC: ${SANDBOX_TIMEOUT_SEC:-120}
-      DOCKER_NETWORK_NAME: ${DOCKER_NETWORK_NAME:-mvp_global_net}
       SANDBOX_IMAGE: ${SANDBOX_IMAGE:-mvp-sandbox:latest}
     volumes:
       - .:/workspace
