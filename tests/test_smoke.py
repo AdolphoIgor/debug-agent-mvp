@@ -3,9 +3,7 @@ from __future__ import annotations
 import os
 from pathlib import Path
 
-import pytest
-from code_indexer import ExtractedSymbol, PythonStructuralIndexer
-from db_pool import DatabasePool
+import code_indexer
 
 
 def test_database_pool_dsn_resolution() -> None:
@@ -25,11 +23,11 @@ def test_ast_python_symbol_parsing(tmp_path: Path) -> None:
     test_file.write_text(dummy_source, encoding="utf-8")
 
     # Parsing is validated without requiring external network connectivity to Qdrant
-    indexer = PythonStructuralIndexer.__new__(PythonStructuralIndexer)
-    import tree_sitter_languages
-    indexer.parser = tree_sitter_languages.get_parser("python")
+    indexer = code_indexer.PythonStructuralIndexer.__new__(code_indexer.PythonStructuralIndexer)
+    indexer.language = code_indexer._load_python_language()
+    indexer.parser = code_indexer._init_python_parser(indexer.language)
 
-    extracted_symbols: list[ExtractedSymbol] = indexer.parse_file(
+    extracted_symbols = indexer.parse_file(
         project_id="smoke_test",
         repo_dir=tmp_path,
         rel_path="dummy_service.py",
