@@ -98,23 +98,18 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    container_name: mvp_mcp_server
-    restart: unless-stopped
+    image: mvp-mcp-server:latest
+    pull_policy: build
+    ports:
+      - "8080:8080"
+    environment:
+      - TARGET_DB_URL=postgresql://mvp_user:mvp_password@postgres:5432/client_baseline_db
+      - PYTHONUNBUFFERED=1
+    networks:
+      - mvp_global_net
     depends_on:
       postgres:
         condition: service_healthy
-      db-init:
-        condition: service_completed_successfully
-    env_file:
-      - .env
-    environment:
-      TARGET_DB_URL: ${TARGET_DB_URL:-postgresql://mvp_user:mvp_password@postgres:5432/client_baseline_db}
-      PYTHONPATH: ${PYTHONPATH:-/workspace/src}
-    command: python src/mcp_db_server.py
-    ports:
-      - "${MCP_SERVER_PORT:-8080}:8080"
-    networks:
-      - mvp_global_net
 
   record-proxy:
     image: python:3.11-slim
