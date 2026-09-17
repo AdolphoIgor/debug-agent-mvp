@@ -2,8 +2,9 @@ from __future__ import annotations
 
 import os
 import re
+from collections.abc import Generator
 from contextlib import contextmanager
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any
 
 import psycopg2
 from mcp.server.fastmcp import FastMCP
@@ -12,7 +13,7 @@ from psycopg2.extras import RealDictCursor
 
 mcp = FastMCP("MVP-DB-Access")
 
-FORBIDDEN_SQL_PATTERNS: List[re.Pattern[str]] = [
+FORBIDDEN_SQL_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b(INSERT)\b", re.IGNORECASE),
     re.compile(r"\b(UPDATE)\b", re.IGNORECASE),
     re.compile(r"\b(DELETE)\b", re.IGNORECASE),
@@ -42,7 +43,7 @@ def get_db_connection() -> Generator[PgConnection, None, None]:
         "TARGET_DB_URL",
         "postgresql://mvp_user:mvp_password@postgres:5432/client_baseline_db"
     )
-    conn: Optional[PgConnection] = None
+    conn: PgConnection | None = None
     try:
         conn = psycopg2.connect(db_url)
         conn.autocommit = True
@@ -83,10 +84,10 @@ def query_database(sql_query: str) -> str:
         with get_db_connection() as conn:
             with conn.cursor(cursor_factory=RealDictCursor) as cur:
                 cur.execute(sql_query)
-                results: List[Dict[str, Any]] = cur.fetchmany(50)
+                results: list[dict[str, Any]] = cur.fetchmany(50)
                 if not results:
                     return "Query executed successfully. Zero records returned."
-                formatted_lines: List[str] = [str(dict(row)) for row in results]
+                formatted_lines: list[str] = [str(dict(row)) for row in results]
                 return "\n".join(formatted_lines)
     except UnauthorizedQueryError as u_exc:
         return f"Policy Violation: {str(u_exc)}"
