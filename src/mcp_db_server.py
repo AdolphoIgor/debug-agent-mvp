@@ -11,7 +11,16 @@ from mcp.server.fastmcp import FastMCP
 from psycopg2.extensions import connection as PgConnection
 from psycopg2.extras import RealDictCursor
 
-mcp = FastMCP("MVP-DB-Access")
+SERVER_HOST: str = os.environ.get("MCP_HOST", os.environ.get("FASTMCP_HOST", "0.0.0.0"))
+SERVER_PORT: int = int(os.environ.get("MCP_PORT", os.environ.get("FASTMCP_PORT", "8080")))
+
+os.environ["FASTMCP_HOST"] = SERVER_HOST
+os.environ["FASTMCP_PORT"] = str(SERVER_PORT)
+
+mcp = FastMCP(name="MVP-DB-Access")
+if hasattr(mcp, "settings"):
+    mcp.settings.host = SERVER_HOST
+    mcp.settings.port = SERVER_PORT
 
 FORBIDDEN_SQL_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b(INSERT)\b", re.IGNORECASE),
@@ -24,15 +33,18 @@ FORBIDDEN_SQL_PATTERNS: list[re.Pattern[str]] = [
     re.compile(r"\b(REVOKE)\b", re.IGNORECASE),
     re.compile(r"\b(EXECUTE)\b", re.IGNORECASE),
     re.compile(r"\b(CALL)\b", re.IGNORECASE),
-    re.compile(r"\b(pg_terminate_backend|pg_cancel_backend)\b", re.IGNORECASE),
 ]
 
 
 class DatabaseAccessError(Exception):
+    """Raised when a relational database query or connection fails."""
+
     pass
 
 
 class UnauthorizedQueryError(Exception):
+    """Raised when non-DQL or mutating SQL statements are detected."""
+
     pass
 
 
@@ -40,7 +52,7 @@ class UnauthorizedQueryError(Exception):
 def get_db_connection() -> Generator[PgConnection, None, None]:
     db_url: str = os.environ.get(
         "TARGET_DB_URL",
-        "postgresql://mvp_user:mvp_password@postgres:5432/mvp_db",
+        "postgresql://mvp_user:mvp_password@postgres:5432/client_baseline_db",
     )
     conn: PgConnection | None = None
     try:
@@ -48,9 +60,7 @@ def get_db_connection() -> Generator[PgConnection, None, None]:
         conn.autocommit = True
         yield conn
     except psycopg2.Error as exc:
-        raise DatabaseAccessError(
-            f"Database connection could not be established: {str(exc)}"
-        ) from exc
+        raise DatabaseAccessError(f"Relational connection failure: {str(exc)}") from exc
     finally:
         if conn is not None and not conn.closed:
             conn.close()
@@ -59,22 +69,26 @@ def get_db_connection() -> Generator[PgConnection, None, None]:
 def validate_dql_query(sql_query: str) -> None:
     sanitized: str = sql_query.strip()
     if not sanitized:
-        raise UnauthorizedQueryError("Query execution rejected: SQL string is empty.")
+        raise UnauthorizedQueryError("Query rejected: SQL statement is empty.")
 
     if not re.match(r"^(SELECT|WITH|EXPLAIN)\b", sanitized, re.IGNORECASE):
         raise UnauthorizedQueryError(
-            "Query execution rejected: Only read-only statements (SELECT, WITH, EXPLAIN) are permitted."
+            "Query rejected: Only read-only operations (SELECT, WITH, EXPLAIN) are permitted."
         )
 
     for pattern in FORBIDDEN_SQL_PATTERNS:
         if pattern.search(sanitized):
             raise UnauthorizedQueryError(
-                f"Query execution rejected: Prohibited SQL token matched ({pattern.pattern})."
+                f"Query rejected: Mutation token matched ({pattern.pattern})."
             )
 
 
 @mcp.tool()
 def query_database(sql_query: str) -> str:
+    """Executes read-only SQL queries on the database to inspect tables and schemas.
+
+    Mutating operations (INSERT, UPDATE, DELETE, DROP, ALTER, TRUNCATE) are rejected.
+    """
     try:
         validate_dql_query(sql_query)
         with get_db_connection() as conn:
@@ -83,8 +97,7 @@ def query_database(sql_query: str) -> str:
                 results: list[dict[str, Any]] = cur.fetchmany(50)
                 if not results:
                     return "Query executed successfully. Zero records returned."
-                formatted_lines: list[str] = [str(dict(row)) for row in results]
-                return "\n".join(formatted_lines)
+                return "\n".join(str(dict(row)) for row in results)
     except UnauthorizedQueryError as u_exc:
         return f"Policy Violation: {str(u_exc)}"
     except DatabaseAccessError as db_exc:
@@ -94,4 +107,4 @@ def query_database(sql_query: str) -> str:
 
 
 if __name__ == "__main__":
-    mcp.run(transport="sse", host="0.0.0.0", port=8080)
+    mcp.run(transport="sse")

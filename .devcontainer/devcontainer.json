@@ -1,36 +1,21 @@
 {
-    "name": "DEBUG-AGENT-MVP DevContainer",
-    "dockerComposeFile": [
-        "../compose.yaml"
-    ],
-    "service": "app",
-    "workspaceFolder": "/workspace",
-    "shutdownAction": "stopCompose",
+    "name": "DEBUG-AGENT-MVP Workspace",
+    "build": {
+        "dockerfile": "../Dockerfile",
+        "context": ".."
+    },
+    "overrideCommand": true,
     "customizations": {
         "vscode": {
             "settings": {
-                "python.defaultInterpreterPath": "/usr/local/bin/python",
-                "python.analysis.extraPaths": [
-                    "/workspace/src"
-                ],
-                "python.testing.pytestEnabled": true,
-                "python.testing.unittestEnabled": false,
-                "python.testing.pytestArgs": [
-                    "tests"
-                ],
-                "editor.formatOnSave": true,
-                "[python]": {
-                    "editor.defaultFormatter": "charliermarsh.ruff"
-                }
+                "python.defaultInterpreterPath": "/usr/local/bin/python"
             },
             "extensions": [
                 "ms-python.python",
-                "ms-python.vscode-pylance",
-                "charliermarsh.ruff",
-                "matangover.mypy",
-                "tamasfe.even-better-toml"
+                "charliermarsh.ruff"
             ]
         }
     },
-    "remoteUser": "root"
+    "remoteUser": "root",
+    "workspaceFolder": "/workspace"
 }

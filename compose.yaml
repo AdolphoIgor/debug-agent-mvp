@@ -1,34 +1,24 @@
-networks:
-  mvp_global_net:
-    name: ${DOCKER_NETWORK_NAME:-mvp_global_net}
-    driver: bridge
-
-volumes:
-  postgres_data:
-  qdrant_data:
-
 services:
   postgres:
     image: postgres:16-alpine
     container_name: mvp_postgres
     restart: unless-stopped
-    env_file:
-      - .env
     environment:
-      POSTGRES_USER: ${POSTGRES_USER:-mvp_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mvp_password}
-      POSTGRES_DB: ${POSTGRES_DB:-mvp_db}
+      POSTGRES_DB: client_baseline_db
+      POSTGRES_USER: mvp_user
+      POSTGRES_PASSWORD: mvp_password
+      PGDATA: /var/lib/postgresql/data/pgdata
     ports:
-      - "${POSTGRES_PORT:-5432}:5432"
+      - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./database/schema.sql:/docker-entrypoint-initdb.d/01_schema.sql:ro
+      - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mvp_user} -d ${POSTGRES_DB:-mvp_db}" ]
+      test: [ "CMD-SHELL", "pg_isready -U mvp_user -d client_baseline_db" ]
       interval: 5s
       timeout: 5s
-      retries: 10
-      start_period: 5s
+      retries: 5
+      start_period: 10s
     networks:
       - mvp_global_net
 
@@ -37,15 +27,16 @@ services:
     container_name: mvp_qdrant
     restart: unless-stopped
     ports:
-      - "${QDRANT_PORT:-6333}:6333"
+      - "6333:6333"
       - "6334:6334"
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
-      test: [ "CMD-SHELL", "timeout 2 bash -c '</dev/tcp/127.0.0.1/6333' || exit 1" ]
+      test: [ "CMD-SHELL", "timeout 2 bash -c '</dev/tcp/localhost/6333' || exit 1" ]
       interval: 5s
       timeout: 5s
       retries: 5
+      start_period: 10s
     networks:
       - mvp_global_net
 
@@ -54,66 +45,41 @@ services:
       context: .
       dockerfile: Dockerfile
     image: mvp-mcp-server:latest
-    pull_policy: build
     container_name: mvp_mcp_server
+    pull_policy: build
     restart: unless-stopped
     ports:
-      - "${MCP_SERVER_HOST_PORT:-8081}:8080"
+      - "8080:8080"
     environment:
-      - TARGET_DB_URL=postgresql://${POSTGRES_USER:-mvp_user}:${POSTGRES_PASSWORD:-mvp_password}@postgres:5432/${POSTGRES_DB:-mvp_db}
-      - PYTHONUNBUFFERED=1
-    networks:
-      - mvp_global_net
+      TARGET_DB_URL: postgresql://mvp_user:mvp_password@postgres:5432/client_baseline_db
+      PYTHONUNBUFFERED: "1"
+      FASTMCP_HOST: "0.0.0.0"
+      FASTMCP_PORT: "8080"
+      MCP_HOST: "0.0.0.0"
+      MCP_PORT: "8080"
     depends_on:
       postgres:
         condition: service_healthy
+    networks:
+      - mvp_global_net
 
   sandbox-image:
     build:
       context: .
       dockerfile: Dockerfile.sandbox
     image: mvp-sandbox:latest
+    container_name: mvp_sandbox_base
     pull_policy: build
     restart: "no"
     network_mode: none
 
-  app:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: mvp-app:latest
-    container_name: mvp_dev_workspace
-    restart: unless-stopped
-    stdin_open: true
-    tty: true
-    ports:
-      - "5678:5678"
-    depends_on:
-      postgres:
-        condition: service_healthy
-      qdrant:
-        condition: service_healthy
-      mcp-server:
-        condition: service_started
-    env_file:
-      - .env
-    environment:
-      DATABASE_URL: postgresql://${POSTGRES_USER:-mvp_user}:${POSTGRES_PASSWORD:-mvp_password}@postgres:5432/${POSTGRES_DB:-mvp_db}
-      POSTGRES_HOST: ${POSTGRES_HOST:-postgres}
-      POSTGRES_PORT: ${POSTGRES_PORT:-5432}
-      POSTGRES_USER: ${POSTGRES_USER:-mvp_user}
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mvp_password}
-      POSTGRES_DB: ${POSTGRES_DB:-mvp_db}
-      QDRANT_URL: ${QDRANT_URL:-http://qdrant:6333}
-      MCP_SERVER_SSE_URL: ${MCP_SERVER_SSE_URL:-http://mcp-server:8080/sse}
-      PYTHONPATH: ${PYTHONPATH:-/workspace:/workspace/src}
-      GCP_PROJECT_ID: ${GCP_PROJECT_ID:-debug-agent-mvp}
-      GEMINI_API_KEY: ${GEMINI_API_KEY:-}
-      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      SANDBOX_TIMEOUT_SEC: ${SANDBOX_TIMEOUT_SEC:-120}
-      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-mvp-sandbox:latest}
-    volumes:
-      - .:/workspace
-      - /var/run/docker.sock:/var/run/docker.sock
-    networks:
-      - mvp_global_net
+networks:
+  mvp_global_net:
+    name: mvp_global_net
+    driver: bridge
+
+volumes:
+  postgres_data:
+    name: mvp_postgres_data
+  qdrant_data:
+    name: mvp_qdrant_data
