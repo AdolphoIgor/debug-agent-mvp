@@ -1,4 +1,36 @@
 services:
+
+  api-gateway:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mvp-api-gateway:latest
+    container_name: mvp_api_gateway
+    restart: unless-stopped
+    command: [ "uvicorn", "src.api_server:app", "--host", "0.0.0.0", "--port", "8000" ]
+    ports:
+      - "8000:8000"
+    environment:
+      - PYTHONPATH=src
+      - DATABASE_URL=postgresql://mvp_user:mvp_password@postgres:5432/client_baseline_db
+      - QDRANT_URL=http://qdrant:6333
+      - MCP_SERVER_SSE_URL=http://mcp-server:8080/sse
+      - SANDBOX_IMAGE=mvp-sandbox:latest
+      - DOCKER_NETWORK_NAME=mvp_global_net
+      - WORKSPACE_BASE_DIR=/tmp/mvp_workspaces
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock
+      - /tmp/mvp_workspaces:/tmp/mvp_workspaces
+    depends_on:
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      mcp-server:
+        condition: service_started
+    networks:
+      - mvp_global_net
+
   postgres:
     image: postgres:16-alpine
     container_name: mvp_postgres

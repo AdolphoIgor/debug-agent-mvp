@@ -27,9 +27,9 @@ from sandbox_engine import PythonHermeticSandbox, SandboxExecutionResult
 
 load_dotenv()
 
-logger = logging.getLogger("debug_agent_mvp.orchestrator")
+logger: logging.Logger = logging.getLogger("debug_agent_mvp.orchestrator")
 
-LOCK_FILE_PATH = Path("/tmp/mvp_orchestrator.lock")
+LOCK_FILE_PATH: Path = Path("/tmp/mvp_orchestrator.lock")
 _lock_fd: int | None = None
 
 _quota_pool: DynamicFreeTierModelPool | None = None
@@ -41,7 +41,9 @@ def get_quota_pool() -> DynamicFreeTierModelPool:
     if _quota_pool is None:
         with _quota_pool_lock:
             if _quota_pool is None:
-                api_key = os.environ.get("GEMINI_API_KEY") or os.environ.get("GOOGLE_API_KEY")
+                api_key: str | None = os.environ.get("GEMINI_API_KEY") or os.environ.get(
+                    "GOOGLE_API_KEY"
+                )
                 if not api_key:
                     raise RuntimeError(
                         "Execution aborted: No valid GEMINI_API_KEY or GOOGLE_API_KEY located in environment."
@@ -128,9 +130,9 @@ def format_authenticated_git_url(raw_url: str, username: str | None, token: str 
     if not username or not token:
         return raw_url
     if raw_url.startswith("https://"):
-        sanitized_base = re.sub(r"^https://[^@]+@", "https://", raw_url)
-        encoded_user = urllib.parse.quote(username, safe="")
-        encoded_token = urllib.parse.quote(token, safe="")
+        sanitized_base: str = re.sub(r"^https://[^@]+@", "https://", raw_url)
+        encoded_user: str = urllib.parse.quote(username, safe="")
+        encoded_token: str = urllib.parse.quote(token, safe="")
         return sanitized_base.replace("https://", f"https://{encoded_user}:{encoded_token}@", 1)
     return raw_url
 
@@ -199,9 +201,9 @@ def node_git_sync_and_rag(state: OrchestratorState) -> dict[str, Any]:
     if before_pull != after_pull:
         diff_cmd: list[str] = ["git", "diff", "--name-only", before_pull, after_pull]
     elif commit_count > 1:
-        diff_cmd = ["git", "diff", "--name-only", "HEAD~1", "HEAD"]
+        diff_cmd: list[str] = ["git", "diff", "--name-only", "HEAD~1", "HEAD"]
     else:
-        diff_cmd = [
+        diff_cmd: list[str] = [
             "git",
             "diff",
             "--name-only",
@@ -221,7 +223,7 @@ def node_git_sync_and_rag(state: OrchestratorState) -> dict[str, Any]:
     )
 
     qdrant_url: str = os.environ.get("QDRANT_URL", "http://qdrant:6333")
-    indexer = PythonStructuralIndexer(qdrant_url=qdrant_url)
+    indexer: PythonStructuralIndexer = PythonStructuralIndexer(qdrant_url=qdrant_url)
     project_identifier: str = state.get("project_id", "default_project")
     indexer.sync_project_files(
         project_id=project_identifier, repo_dir=ws, files_to_sync=changed_files
@@ -237,7 +239,7 @@ def node_git_sync_and_rag(state: OrchestratorState) -> dict[str, Any]:
 async def node_programmer(state: OrchestratorState) -> dict[str, Any]:
     pool: DynamicFreeTierModelPool = get_quota_pool()
     model_name: str = pool.get_active_model()
-    client = pool.client
+    client: genai.Client = pool.client
 
     canary: str = secrets.token_hex(16)
     clean_prompt: str = re.sub(
@@ -341,7 +343,7 @@ Generate a unified diff patch and a fully mocked, executable pytest unit test.
 def node_blind_auditor(state: OrchestratorState) -> dict[str, Any]:
     pool: DynamicFreeTierModelPool = get_quota_pool()
     model_name: str = pool.get_active_model()
-    client = pool.client
+    client: genai.Client = pool.client
 
     canary: str = secrets.token_hex(16)
     patch: AssistantPatch | None = state.get("current_patch")
@@ -394,7 +396,7 @@ Verification Criteria:
 def node_consultant(state: OrchestratorState) -> dict[str, Any]:
     pool: DynamicFreeTierModelPool = get_quota_pool()
     model_name: str = pool.get_active_model()
-    client = pool.client
+    client: genai.Client = pool.client
 
     canary: str = secrets.token_hex(16)
 
@@ -441,7 +443,7 @@ def node_sandbox_execution(state: OrchestratorState) -> dict[str, Any]:
         return {"tests_passed": False, "sandbox_logs": "No patch available for execution."}
 
     ws: Path = Path(state["workspace_path"]).resolve()
-    sandbox = PythonHermeticSandbox(
+    sandbox: PythonHermeticSandbox = PythonHermeticSandbox(
         workspace_path=ws,
         ticket_id=state["ticket_id"],
     )
@@ -542,8 +544,12 @@ def route_after_sandbox(
     return "node_programmer"
 
 
-def build_mvp_showcase_graph() -> StateGraph:
-    workflow = StateGraph(OrchestratorState, input=OrchestratorInput)
+def build_mvp_showcase_graph() -> StateGraph[
+    OrchestratorState, Any, OrchestratorInput, OrchestratorState
+]:
+    workflow: StateGraph[OrchestratorState, Any, OrchestratorInput, OrchestratorState] = StateGraph(
+        OrchestratorState, input=OrchestratorInput
+    )
 
     workflow.add_node("node_acquire_execution_lock", node_acquire_execution_lock)
     workflow.add_node("node_git_sync_and_rag", node_git_sync_and_rag)
