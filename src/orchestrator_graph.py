@@ -14,10 +14,12 @@ from pathlib import Path
 from typing import Any, Literal
 
 from dotenv import load_dotenv
+from google import genai
 from google.genai import errors, types
 from langgraph.graph import END, START, StateGraph
 from mcp import ClientSession
 from mcp.client.sse import sse_client
+from mcp.types import TextContent
 from pydantic import BaseModel, Field
 from typing_extensions import TypedDict
 
@@ -168,12 +170,12 @@ def node_acquire_execution_lock(state: OrchestratorState) -> dict[str, Any]:
 
 
 def node_git_sync_and_rag(state: OrchestratorState) -> dict[str, Any]:
-    ws: Path = Path(state["workspace_path"]).resolve()
+    ws: Path = Path(state.get("workspace_path", "")).resolve()
     ws.mkdir(parents=True, exist_ok=True)
 
     git_user: str | None = os.environ.get("GIT_USERNAME")
     git_token: str | None = os.environ.get("GIT_TOKEN")
-    auth_url: str = format_authenticated_git_url(state["repo_url"], git_user, git_token)
+    auth_url: str = format_authenticated_git_url(state.get("repo_url", ""), git_user, git_token)
     default_branch: str = os.environ.get("GIT_DEFAULT_BRANCH", "main")
     git_env: dict[str, str] = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
@@ -219,7 +221,10 @@ def node_git_sync_and_rag(state: OrchestratorState) -> dict[str, Any]:
     ]
 
     subprocess.run(
-        ["git", "checkout", "-B", state["branch_name"]], cwd=str(ws), check=True, env=git_env
+        ["git", "checkout", "-B", state.get("branch_name", "")],
+        cwd=str(ws),
+        check=True,
+        env=git_env,
     )
 
     qdrant_url: str = os.environ.get("QDRANT_URL", "http://qdrant:6333")
@@ -231,7 +236,7 @@ def node_git_sync_and_rag(state: OrchestratorState) -> dict[str, Any]:
 
     context: dict[str, Any] = indexer.query_semantic_bug_sources(
         project_id=project_identifier,
-        bug_description=state["prompt_your_codebase"],
+        bug_description=state.get("prompt_your_codebase", ""),
     )
     return {"context_data": context}
 
@@ -243,10 +248,10 @@ async def node_programmer(state: OrchestratorState) -> dict[str, Any]:
 
     canary: str = secrets.token_hex(16)
     clean_prompt: str = re.sub(
-        r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", state["prompt_your_codebase"]
+        r"[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]", "", state.get("prompt_your_codebase", "")
     ).strip()
 
-    mcp_tools: list[types.Tool] = [
+    mcp_tools: list[Any] = [
         types.Tool(
             function_declarations=[
                 types.FunctionDeclaration(
@@ -299,7 +304,7 @@ Generate a unified diff patch and a fully mocked, executable pytest unit test.
         while response.function_calls:
             for call in response.function_calls:
                 if call.name == "query_database":
-                    query_arg: str = call.args.get("sql_query", "")
+                    query_arg: str = (call.args or {}).get("sql_query", "")
                     mcp_url: str = os.environ.get(
                         "MCP_SERVER_SSE_URL", "http://mcp-server:8080/sse"
                     )
@@ -311,7 +316,7 @@ Generate a unified diff patch and a fully mocked, executable pytest unit test.
                                 "query_database", arguments={"sql_query": query_arg}
                             )
                             tool_output = "\n".join(
-                                [c.text for c in result.content if hasattr(c, "text")]
+                                [c.text for c in result.content if isinstance(c, TextContent)]
                             )
 
                     response = chat.send_message(
@@ -336,7 +341,7 @@ Generate a unified diff patch and a fully mocked, executable pytest unit test.
             pool.report_exhaustion(model_name)
         raise exc
 
-    patch: AssistantPatch = AssistantPatch.model_validate_json(structured_res.text)
+    patch: AssistantPatch = AssistantPatch.model_validate_json(structured_res.text or "{}")
     return {"current_patch": patch}
 
 
@@ -380,7 +385,7 @@ Verification Criteria:
             pool.report_exhaustion(model_name)
         raise exc
 
-    audit: AntagonistAudit = AntagonistAudit.model_validate_json(res.text)
+    audit: AntagonistAudit = AntagonistAudit.model_validate_json(res.text or "{}")
     feedback: str = (
         audit.critique if audit.verdict == "REJECT" else state.get("programmer_feedback", "")
     )
@@ -429,7 +434,7 @@ Diagnose why the current mocked testing strategy or patch failed and formulate a
             pool.report_exhaustion(model_name)
         raise exc
 
-    strategy: ConsultantStrategy = ConsultantStrategy.model_validate_json(res.text)
+    strategy: ConsultantStrategy = ConsultantStrategy.model_validate_json(res.text or "{}")
     return {
         "consultant_guidance": f"Diagnostic: {strategy.diagnostic}\nStrategy: {strategy.suggested_approach}",
         "stagnation_counter": 0,
@@ -442,10 +447,10 @@ def node_sandbox_execution(state: OrchestratorState) -> dict[str, Any]:
     if not patch:
         return {"tests_passed": False, "sandbox_logs": "No patch available for execution."}
 
-    ws: Path = Path(state["workspace_path"]).resolve()
+    ws: Path = Path(state.get("workspace_path", "")).resolve()
     sandbox: PythonHermeticSandbox = PythonHermeticSandbox(
         workspace_path=ws,
-        ticket_id=state["ticket_id"],
+        ticket_id=state.get("ticket_id", ""),
     )
 
     subprocess.run(["git", "reset", "--hard", "HEAD"], cwd=str(ws), check=False)
@@ -488,17 +493,19 @@ def node_sandbox_execution(state: OrchestratorState) -> dict[str, Any]:
 
 def node_publish_and_index(state: OrchestratorState) -> dict[str, Any]:
     try:
-        ws: Path = Path(state["workspace_path"]).resolve()
+        ws: Path = Path(state.get("workspace_path", "")).resolve()
         git_user: str | None = os.environ.get("GIT_USERNAME")
         git_token: str | None = os.environ.get("GIT_TOKEN")
-        auth_url: str = format_authenticated_git_url(state["repo_url"], git_user, git_token)
+        auth_url: str = format_authenticated_git_url(state.get("repo_url", ""), git_user, git_token)
         git_env: dict[str, str] = {**os.environ, "GIT_TERMINAL_PROMPT": "0"}
 
         subprocess.run(["git", "add", "-A"], cwd=str(ws), check=True, env=git_env)
-        msg: str = f"[MVP] Automated remediation for prompt: {state['prompt_your_codebase'][:60]}"
+        msg: str = (
+            f"[MVP] Automated remediation for prompt: {state.get('prompt_your_codebase', '')[:60]}"
+        )
         subprocess.run(["git", "commit", "-m", msg], cwd=str(ws), check=True, env=git_env)
         subprocess.run(
-            ["git", "push", "-u", auth_url, state["branch_name"]],
+            ["git", "push", "-u", auth_url, state.get("branch_name", "")],
             cwd=str(ws),
             check=True,
             env=git_env,
@@ -548,7 +555,7 @@ def build_mvp_showcase_graph() -> StateGraph[
     OrchestratorState, Any, OrchestratorInput, OrchestratorState
 ]:
     workflow: StateGraph[OrchestratorState, Any, OrchestratorInput, OrchestratorState] = StateGraph(
-        OrchestratorState, input=OrchestratorInput
+        OrchestratorState, input_schema=OrchestratorInput
     )
 
     workflow.add_node("node_acquire_execution_lock", node_acquire_execution_lock)

@@ -68,16 +68,11 @@ The system core is a compiled LangGraph workflow modeling the debugging lifecycl
 
 * **Ingest & Reproduce:** Runs baseline test commands within the sandbox to capture raw tracebacks and verify reproducibility.
 
-
 * **Locate & Retrieve:** Queries semantic indices and file hierarchies to pinpoint failing modules, functions, and cross-file dependencies.
-
 
 * **Hypothesize & Formulate:** Generates a minimal, focused patch addressing the identified root cause.
 
-
 * **Validate & Reflect:** Applies the patch in the sandbox and re-executes tests. If failures persist, standard output and error streams are fed back into the agent context for dynamic self-correction up to a configured threshold.
-
-
 
 ### 2. Isolated Execution Sandbox (`src/sandbox_engine.py`, `Dockerfile.sandbox`)
 
@@ -85,13 +80,9 @@ Untrusted runtime code execution is segregated into isolated, disposable executi
 
 * **Container-Level Isolation:** Leverages Docker APIs to run code independently of the host orchestrator.
 
-
 * **Bounded Resource Allocation:** Enforces deterministic execution windows via explicit timeouts, mitigating infinite loops and out-of-memory crashes.
 
-
 * **Deterministic Diagnostics:** Aggregates stdout, stderr, and exit codes into typed payloads returned directly to the state machine.
-
-
 
 ### 3. Model Context Protocol Server (`src/mcp_db_server.py`)
 
@@ -99,10 +90,7 @@ Decouples agent logic from persistence:
 
 * Implements the standardized Model Context Protocol (MCP) over Server-Sent Events (SSE).
 
-
 * Provides client LLMs with uniform primitives to inspect schemas, execute parameterized queries, and query semantic similarity without exposing direct database credentials to the model.
-
-
 
 ### 4. Dynamic Free-Tier Model Pool (`src/gemini_quota_pool.py`)
 
@@ -110,10 +98,7 @@ Provides resilient LLM client access against daily quota ceilings:
 
 * Automatically discovers and ranks available Gemini models from the Google GenAI SDK.
 
-
 * Detects quota exhaustion (HTTP 429) across nodes and routes requests dynamically to healthy fallback models in the pool.
-
-
 
 ### 5. Semantic Code Indexer (`src/code_indexer.py`)
 
@@ -121,31 +106,25 @@ Replaces naive sliding-window text chunking with context-aware semantic indexing
 
 * Parses repository structures using tree-sitter AST queries to extract classes, functions, and docstrings.
 
-
 * Computes vector representations of source blocks for storage, enabling pinpoint semantic retrieval of relevant symbols during root-cause localization.
-
-
 
 ### 6. High-Throughput Persistence Tier (`src/db_pool.py`, `database/schema.sql`)
 
 * Backed by PostgreSQL with relational schemas and vector extensions.
 
-
 * Managed via a connection pool (`psycopg2`) ensuring non-blocking operations, connection reuse, and resilience under concurrent execution loads.
-
-
 
 ## Technical Stack & Tooling
 
 | Domain | Technology / Specification | Rationale |
 | --- | --- | --- |
-| **Language Runtime** | Python 3.11 | High performance, modern typing support, native async primitives.|
-| **Package Management** | `uv` (Astral) | Sub-second deterministic resolution and lockfile synchronization (`uv.lock`).|
-| **Agent Orchestration** | LangGraph / LangChain | Stateful, multi-actor cyclic graphs with typed checkpoints and conditional routing.|
-| **LLM Inference** | Google GenAI SDK (`google-genai`) | Native integration with Gemini models and dynamic quota pool management.|
-| **Tool Protocol** | Model Context Protocol (MCP) | Vendor-agnostic, enterprise-standard schema for AI tool invocation.|
-| **Database & Vectors** | PostgreSQL 16 & Qdrant | Hybrid relational schema and fast vector similarity indexing.|
-| **Isolation Barrier** | Docker Compose / Docker API | Hard sandbox isolation preventing host pollution during dynamic code execution.|
+| **Language Runtime** | Python 3.11 | High performance, modern typing support, native async primitives. |
+| **Package Management** | `uv` (Astral) | Sub-second deterministic resolution and lockfile synchronization (`uv.lock`). |
+| **Agent Orchestration** | LangGraph / LangChain | Stateful, multi-actor cyclic graphs with typed checkpoints and conditional routing. |
+| **LLM Inference** | Google GenAI SDK (`google-genai`) | Native integration with Gemini models and dynamic quota pool management. |
+| **Tool Protocol** | Model Context Protocol (MCP) | Vendor-agnostic, enterprise-standard schema for AI tool invocation. |
+| **Database & Vectors** | PostgreSQL 16 & Qdrant | Hybrid relational schema and fast vector similarity indexing. |
+| **Isolation Barrier** | Docker Compose / Docker API | Hard sandbox isolation preventing host pollution during dynamic code execution. |
 
 ## Directory Structure
 
@@ -179,16 +158,11 @@ uv.lock                     # Cryptographically pinned dependency graph
 
 * Docker Engine 24.0+ and Docker Compose v2+
 
-
 * Python 3.11+ (if running bare-metal)
-
 
 * `uv` package manager (`curl -LsSf https://astral.sh/uv/install.sh | sh`)
 
-
 * A valid Google AI Studio API Key (Free tier recommended)
-
-
 
 ### Environment Configuration
 
@@ -203,16 +177,11 @@ Ensure the following environment variables are supplied in `.env`:
 
 * `GEMINI_API_KEY`: Your personal Google AI Studio key.
 
-
 * `DATABASE_URL`: PostgreSQL connection string (`postgresql://mvp_user:mvp_password@postgres:5432/mvp_db`).
-
 
 * `POSTGRES_USER`, `POSTGRES_PASSWORD`, `POSTGRES_DB`: Credentials matching your database deployment.
 
-
 * `QDRANT_URL`: Vector database host URL (`http://qdrant:6333`).
-
-
 
 ### Local Infrastructure Deployment
 
@@ -274,20 +243,14 @@ Key architectural decisions are documented to preserve institutional design rati
 
 * **ADR-0001: Model Context Protocol (MCP) for Tooling**: Standardize database and retrieval interfaces over FastMCP rather than proprietary wrappers.
 
-
 * **ADR-0002: Dual-Container Execution Boundary**: Enforce strict separation between the orchestrator container and the evaluation sandbox (`Dockerfile.sandbox`) to prevent container breakout vulnerabilities.
 
-
 * **ADR-0003: Ephemeral Copy-on-Write Database Clones**: Provision disposable test databases via `TEMPLATE` cloning during sandbox executions and drop them on teardown.
-
-
 
 ## Engineering Quality & Production Readiness
 
 * **Zero-Trust Runtime Execution:** Every command executed during regression testing runs inside a segregated container with dropped capabilities (`--cap-drop=ALL`) and unprivileged user context.
 
-
 * **Resilient Quota Allocation:** Dynamic pool cycling allows continuous operation across multi-round agent reflection without failing on individual model quota spikes.
-
 
 * **Deterministic Reproducibility:** Hermetic dependency management via `uv.lock` and Docker multi-stage builds guarantee environment uniformity across local devcontainers, CI/CD runners, and host execution.
