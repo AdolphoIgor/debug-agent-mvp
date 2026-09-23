@@ -18,11 +18,84 @@ Designed with an emphasis on systems engineering, operational resilience, and de
 
 ## Workflow Flowchart (English)
 
-![Complete Workflow Flowchart for the Autonomous Debug Agent (English)](docs/images/autonomous_workflow_en.jpeg)
+```mermaid
+flowchart TD
+    classDef startNode fill:#2563eb,stroke:#1d4ed8,color:#ffffff,stroke-width:2px;
+    classDef syncNode fill:#7c3aed,stroke:#6d28d9,color:#ffffff,stroke-width:2px;
+    classDef phase1Node fill:#0284c7,stroke:#0369a1,color:#ffffff,stroke-width:2px;
+    classDef phase2Node fill:#059669,stroke:#047857,color:#ffffff,stroke-width:2px;
+    classDef consultantNode fill:#d97706,stroke:#b45309,color:#ffffff,stroke-width:2px;
+    classDef decisionNode fill:#f8fafc,stroke:#475569,color:#0f172a,stroke-width:2px;
+    classDef successNode fill:#16a34a,stroke:#15803d,color:#ffffff,stroke-width:2px;
 
-## Fluxograma do Fluxo de Depuração Autônomo (Português)
+    UserInput(["User Request: issue_id & problem_statement"]):::startNode
+    GitDelta{"Git Delta Detected in .py?"}:::decisionNode
 
-![Fluxograma Completo do Fluxo de Trabalho do Agente de Depuração Autônomo (Português)](docs/images/autonomous_workflow_pt.jpeg)
+    UserInput --> NodeGitSync["node_git_sync<br/>(Git pull & diff check)"]:::syncNode
+    NodeGitSync --> GitDelta
+
+    subgraph IndexingSubsystem ["Incremental Structural & Semantic Indexing"]
+        TreeSitter["Tree-sitter AST Parser<br/>(Extract functions, classes & calls)"]:::syncNode
+        PostgresSync[("PostgreSQL<br/>code_symbols & code_dependencies")]:::syncNode
+        QdrantSync[("Qdrant Vector DB<br/>mvp_codebase Collection")]:::syncNode
+    end
+
+    GitDelta -- "Yes" --> TreeSitter
+    TreeSitter -->|"Persist symbols & call edges"| PostgresSync
+    TreeSitter -->|"FastEmbed symbols"| QdrantSync
+    GitDelta -- "No" --> MCPServerReady
+
+    PostgresSync --> MCPServerReady["FastMCP Code Intelligence Server<br/>(search_codebase, get_symbol_blast_radius, read_source_file)"]:::syncNode
+    QdrantSync --> MCPServerReady
+
+    MCPServerReady --> P1_Prog["node_programmer (Phase 1: Reproduction)<br/>- Queries codebase via MCP<br/>- Generates pytest with in-memory mocks<br/>- Modifies NO production code"]:::phase1Node
+
+    subgraph Phase1 ["Phase 1: Reproduction & Test Locking"]
+        P1_Auditor{"node_blind_auditor<br/>Zero-Context Inspection:<br/>Valid mocked pytest?"}:::decisionNode
+        P1_Sandbox{"node_sandbox_execution<br/>Hermetic Container --network=none<br/>Does test fail on baseline?"}:::decisionNode
+        LockTest["FREEZE REGRESSION TEST<br/>- is_test_locked = True<br/>- locked_test_code preserved<br/>- Reset stagnation & consultant counters"]:::phase1Node
+    end
+
+    P1_Prog --> P1_Auditor
+    P1_Auditor -- "APPROVE" --> P1_Sandbox
+    P1_Auditor -- "REJECT" --> P1_AuditStag{"Stagnation >= 3?"}:::decisionNode
+    P1_AuditStag -- "No (Retry)" --> P1_Prog
+
+    P1_Sandbox -- "Yes (Reproduced error)" --> LockTest
+    P1_Sandbox -- "No (Passed on baseline or syntax error)" --> P1_SandStag{"Stagnation >= 3?"}:::decisionNode
+    P1_SandStag -- "No (Retry)" --> P1_Prog
+
+    LockTest --> P2_Prog["node_programmer (Phase 2: Resolution)<br/>- Locked test is IMMUTABLE<br/>- Generates unified git patch for prod code<br/>- Adds DDL/migration files if schema changed"]:::phase2Node
+
+    subgraph Phase2 ["Phase 2: Resolution & Autonomous Publishing"]
+        P2_Auditor{"node_blind_auditor<br/>Zero-Context Inspection:<br/>Safe patch? Locked test untouched?"}:::decisionNode
+        P2_Sandbox{"node_sandbox_execution<br/>Hermetic Container --network=none<br/>Run locked test + full suite"}:::decisionNode
+        Publish["node_publish_and_index<br/>- Create branch: fix/issue-{id}-{timestamp}<br/>- Stage prod patch, locked test & DDL<br/>- Commit & push autonomously"]:::successNode
+    end
+
+    P2_Prog --> P2_Auditor
+    P2_Auditor -- "APPROVE" --> P2_Sandbox
+    P2_Auditor -- "REJECT" --> P2_AuditStag{"Stagnation >= 3?"}:::decisionNode
+    P2_AuditStag -- "No (Retry)" --> P2_Prog
+
+    P2_Sandbox -- "All tests pass" --> Publish
+    P2_Sandbox -- "Tests fail" --> P2_SandStag{"Stagnation >= 3?"}:::decisionNode
+    P2_SandStag -- "No (Retry)" --> P2_Prog
+
+    subgraph EscalationSystem ["Architectural Escalation"]
+        Consultant["node_consultant<br/>- Analyzes failure logs & critiques<br/>- Queries MCP for structural redesign<br/>- Injects consultant_guidance<br/>- Resets stagnation counter"]:::consultantNode
+    end
+
+    P1_AuditStag -- "Yes (Threshold reached)" --> Consultant
+    P1_SandStag -- "Yes (Threshold reached)" --> Consultant
+    P2_AuditStag -- "Yes (Threshold reached)" --> Consultant
+    P2_SandStag -- "Yes (Threshold reached)" --> Consultant
+
+    Consultant -->|"Guidance for reproduction"| P1_Prog
+    Consultant -->|"Guidance for resolution"| P2_Prog
+
+    Publish --> FlowEnd(["Workflow Complete: Fix Published"]):::successNode
+```
 
 ## The Engineering Challenge & Problem Space
 
