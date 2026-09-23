@@ -32,7 +32,21 @@ STAGNATION_THRESHOLD = 3
 MAX_CONSULTANT_CYCLES = 2
 
 
+class InputState(TypedDict):
+    """
+    Exposed strictly to the UI / entrypoint as external parameters.
+    Only these fields will appear as user inputs in LangGraph Studio.
+    """
+
+    issue_id: str
+    problem_statement: str
+
+
 class WorkflowState(TypedDict):
+    """
+    Complete state schema managed across the workflow lifecycle.
+    """
+
     issue_id: str
     problem_statement: str
     current_phase: Literal["reproduction", "resolution"]
@@ -212,8 +226,8 @@ class PythonHermeticSandbox:
 
 def node_git_sync(state: WorkflowState) -> dict[str, Any]:
     """
-    Synchronizes repository state and deterministically triggers reindexing
-    only when a Git delta is detected.
+    Synchronizes repository state, verifies git delta, and initializes default values
+    for all internal state variables omitted from the UI inputs.
     """
     logger.info("Executing Git synchronization and delta verification.")
     diff_cmd = subprocess.run(
@@ -242,9 +256,26 @@ def node_git_sync(state: WorkflowState) -> dict[str, Any]:
         logger.info("No delta detected. Codebase index is up to date.")
 
     return {
-        "execution_status": "IN_PROGRESS",
+        "current_phase": state.get("current_phase") or "reproduction",
+        "is_test_locked": state.get("is_test_locked", False),
+        "locked_test_path": state.get("locked_test_path", ""),
+        "locked_test_code": state.get("locked_test_code", ""),
+        "candidate_test_path": state.get("candidate_test_path", ""),
+        "candidate_test_code": state.get("candidate_test_code", ""),
+        "candidate_patch": state.get("candidate_patch", ""),
+        "database_migration_artifacts": state.get("database_migration_artifacts", []),
+        "audit_verdict": state.get("audit_verdict", "PENDING"),
+        "auditor_critique": state.get("auditor_critique", ""),
+        "programmer_feedback": state.get("programmer_feedback", ""),
+        "sandbox_passed": state.get("sandbox_passed", False),
+        "sandbox_output": state.get("sandbox_output", ""),
         "stagnation_counter": 0,
         "consultant_cycles": 0,
+        "consultant_guidance": state.get("consultant_guidance", ""),
+        "target_branch": state.get("target_branch", ""),
+        "commit_message": state.get("commit_message", ""),
+        "final_solution": state.get("final_solution", ""),
+        "execution_status": "IN_PROGRESS",
     }
 
 
@@ -700,9 +731,10 @@ def route_after_sandbox(state: WorkflowState) -> str:
 
 def build_orchestrator_graph():
     """
-    Constructs the LangGraph autonomous debug workflow graph.
+    Constructs the LangGraph autonomous debug workflow graph using InputState
+    to restrict exposed UI input fields in LangGraph Studio.
     """
-    graph = StateGraph(WorkflowState)
+    graph = StateGraph(WorkflowState, input_schema=InputState)
 
     graph.add_node("node_git_sync", node_git_sync)
     graph.add_node("node_programmer", node_programmer)
@@ -741,3 +773,7 @@ def build_orchestrator_graph():
     graph.add_edge("node_publish_and_index", END)
 
     return graph.compile()
+
+
+app = build_orchestrator_graph()
+build_mvp_showcase_graph = build_orchestrator_graph
