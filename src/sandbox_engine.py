@@ -1,109 +1,144 @@
-from __future__ import annotations
-
+import logging
 import os
-import secrets
-import stat
 import subprocess
-from dataclasses import dataclass
 from pathlib import Path
 
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-@dataclass(frozen=True)
+
 class SandboxExecutionResult:
-    returncode: int
-    stdout: str
-    stderr: str
-    timed_out: bool
+    """
+    Encapsulates results from sandbox execution runs.
+    """
+
+    def __init__(self, exit_code: int, stdout: str, stderr: str):
+        self.exit_code = exit_code
+        self.stdout = stdout
+        self.stderr = stderr
+
+    @property
+    def passed(self) -> bool:
+        return self.exit_code == 0
 
 
-class PythonHermeticSandbox:
-    def __init__(
-        self,
-        workspace_path: Path,
-        ticket_id: str,
-        timeout_sec: int | None = None,
-    ) -> None:
-        self.workspace_path: Path = workspace_path.resolve()
-        self.ticket_id: str = ticket_id
-        env_timeout: int = int(os.environ.get("SANDBOX_TIMEOUT_SEC", "120"))
-        self.timeout_sec: int = timeout_sec or env_timeout
+class SandboxEngine:
+    """
+    Manages isolated containerized test runs under strict hermetic settings.
+    """
 
-    def write_test_file_securely(self, rel_path: str, content: str) -> None:
-        target: Path = (self.workspace_path / rel_path).resolve()
-        if not target.is_relative_to(self.workspace_path):
-            raise PermissionError(f"Path traversal escape detected: {rel_path}")
-        if ".git" in target.parts or target.name.startswith(".git"):
-            raise PermissionError("Writing to the .git directory is strictly prohibited.")
+    def __init__(self, workspace_path: Path):
+        self.workspace_path = workspace_path
+        self.sandbox_image = os.getenv("SANDBOX_IMAGE", "mvp-sandbox:latest")
+        self.timeout_sec = int(os.getenv("SANDBOX_TIMEOUT_SEC", "120"))
 
-        target.parent.mkdir(parents=True, exist_ok=True)
-        target.write_text(content, encoding="utf-8")
-
-    def apply_patch(self, unified_diff: str) -> subprocess.CompletedProcess[str]:
-        return subprocess.run(
-            ["git", "apply", "--whitespace=fix", "-"],
-            input=unified_diff,
-            text=True,
-            cwd=str(self.workspace_path),
+    def clean_workspace(self) -> None:
+        """
+        Cleans untracked files and resets working tree.
+        """
+        subprocess.run(
+            ["git", "reset", "--hard", "HEAD"],
+            cwd=self.workspace_path,
+            capture_output=True,
+            check=False,
+        )
+        subprocess.run(
+            ["git", "clean", "-fd"],
+            cwd=self.workspace_path,
             capture_output=True,
             check=False,
         )
 
-    def run_pytest(
+    def run_tests(
         self,
-        test_file: str | None = None,
-        extra_env: dict[str, str] | None = None,
+        test_path: str,
+        patch_content: str | None = None,
+        run_full_suite: bool = False,
     ) -> SandboxExecutionResult:
-        cmd_args: list[str] = ["pytest", "-q", test_file] if test_file else ["pytest", "-q"]
-        env_token: str = secrets.token_hex(8)
-        env_path: Path = Path(f"/tmp/.mvp_env_{env_token}.tmp")
-        flags: int = os.O_WRONLY | os.O_CREAT | os.O_EXCL
-        mode: int = stat.S_IRUSR | stat.S_IWUSR
-        fd: int = os.open(str(env_path), flags, mode)
+        """
+        Executes pytest inside the hermetic container with text decoding enforced.
+        """
+        self.clean_workspace()
 
-        sandbox_image: str = os.environ.get("SANDBOX_IMAGE", "mvp-sandbox:latest")
+        if patch_content and patch_content.strip():
+            patch_file = self.workspace_path / ".engine_exec.patch"
+            try:
+                patch_file.write_text(patch_content, encoding="utf-8")
+                apply_res = subprocess.run(
+                    ["git", "apply", "--whitespace=nowarn", str(patch_file)],
+                    cwd=self.workspace_path,
+                    capture_output=True,
+                    text=True,
+                    check=False,
+                )
+                if apply_res.returncode != 0:
+                    return SandboxExecutionResult(
+                        exit_code=1,
+                        stdout="",
+                        stderr=f"Failed applying patch:\n{apply_res.stderr}",
+                    )
+            finally:
+                if patch_file.exists():
+                    patch_file.unlink()
+
+        target_test_file = (self.workspace_path / test_path).resolve()
+        if not target_test_file.is_file() or not target_test_file.is_relative_to(
+            self.workspace_path
+        ):
+            return SandboxExecutionResult(
+                exit_code=1,
+                stdout="",
+                stderr=f"Test file not found: {test_path}",
+            )
+
+        test_rel_path = str(target_test_file.relative_to(self.workspace_path))
+        cmd = [
+            "docker",
+            "run",
+            "--rm",
+            "--network=none",
+            "--cap-drop=ALL",
+            "--security-opt=no-new-privileges",
+            "-u",
+            "1000:1000",
+            "-v",
+            f"{self.workspace_path}:/workspace",
+            "-w",
+            "/workspace",
+            "-e",
+            "PYTHONPATH=/workspace:/workspace/src",
+            self.sandbox_image,
+            "pytest",
+            "-q",
+        ]
+
+        if run_full_suite:
+            cmd.extend([test_rel_path, "tests"])
+        else:
+            cmd.append(test_rel_path)
 
         try:
-            with open(fd, "w", encoding="utf-8") as f:
-                if extra_env:
-                    for k, v in extra_env.items():
-                        f.write(f"{k}={v}\n")
-
-            cmd: list[str] = [
-                "docker",
-                "run",
-                "--rm",
-                "--network=none",
-                "--cap-drop=ALL",
-                "--security-opt=no-new-privileges:true",
-                f"--env-file={str(env_path)}",
-                "-v",
-                f"{self.workspace_path}:/workspace:rw",
-                "-w",
-                "/workspace",
-                sandbox_image,
-                *cmd_args,
-            ]
-            proc: subprocess.CompletedProcess[str] = subprocess.run(
+            res = subprocess.run(
                 cmd,
                 capture_output=True,
                 text=True,
                 timeout=self.timeout_sec,
                 check=False,
             )
-            return SandboxExecutionResult(proc.returncode, proc.stdout, proc.stderr, False)
-        except subprocess.TimeoutExpired as exc:
             return SandboxExecutionResult(
-                -1,
-                exc.stdout or "",
-                "Hermetic sandbox execution timed out.",
-                True,
+                exit_code=res.returncode,
+                stdout=res.stdout or "",
+                stderr=res.stderr or "",
             )
-        finally:
-            if env_path.exists():
-                env_path.unlink()
-
-
-__all__ = [
-    "PythonHermeticSandbox",
-    "SandboxExecutionResult",
-]
+        except subprocess.TimeoutExpired:
+            return SandboxExecutionResult(
+                exit_code=-1,
+                stdout="",
+                stderr=f"Sandbox execution timed out after {self.timeout_sec} seconds.",
+            )
+        except Exception as exc:
+            return SandboxExecutionResult(
+                exit_code=1,
+                stdout="",
+                stderr=f"Sandbox error: {exc}",
+            )

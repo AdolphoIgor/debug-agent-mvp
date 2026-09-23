@@ -741,6 +741,3 @@ def build_orchestrator_graph():
     graph.add_edge("node_publish_and_index", END)
 
     return graph.compile()
-
-
-app = build_orchestrator_graph()

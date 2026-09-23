@@ -23,9 +23,9 @@ SRC_PATH: str = str(CURRENT_DIR)
 if SRC_PATH not in sys.path:
     sys.path.insert(0, SRC_PATH)
 
-from langgraph.graph.state import CompiledStateGraph
+from langgraph.graph.state import CompiledStateGraph  # noqa: E402
 
-from orchestrator_graph import build_mvp_showcase_graph
+from orchestrator_graph import build_orchestrator_graph  # noqa: E402
 
 logger = logging.getLogger("mvp.studio")
 logging.basicConfig(
@@ -51,8 +51,7 @@ def load_orchestrator_graph() -> CompiledStateGraph:
     """
     try:
         logger.info("Instantiating StateGraph builder for DEBUG-AGENT-MVP...")
-        workflow_builder = build_mvp_showcase_graph()
-        compiled_graph: CompiledStateGraph = workflow_builder.compile()
+        compiled_graph: CompiledStateGraph = build_orchestrator_graph()
         logger.info("StateGraph successfully compiled for LangGraph Studio.")
         return compiled_graph
     except Exception as exc:
