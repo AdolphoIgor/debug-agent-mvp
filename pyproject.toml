@@ -38,6 +38,7 @@ dev = [
     "debugpy>=1.8.0",
     "ruff>=0.8.0",
     "mypy>=1.13.0",
+    "pytest-mock>=3.14.0",
 ]
 
 [dependency-groups]
@@ -49,6 +50,7 @@ dev = [
     "ruff>=0.8.0",
     "langgraph-cli[inmem]>=0.4.31",
     "langgraph-api>=0.14.3",
+    "pytest-mock>=3.14.0",
 ]
 
 [tool.hatch.build.targets.wheel]

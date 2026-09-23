@@ -1,408 +1,444 @@
-from __future__ import annotations
-
-import ctypes
-import hashlib
+import logging
 import os
-import sys
-import threading
 import uuid
-from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
-import tree_sitter_languages
+import psycopg2
+import psycopg2.extras
 from fastembed import TextEmbedding
-from psycopg2.extras import execute_values
 from qdrant_client import QdrantClient
-from qdrant_client.http import models as qmodels
-from tree_sitter import Language, Parser
+from qdrant_client.models import Distance, PointStruct, VectorParams
+from tree_sitter_languages import get_language, get_parser
 
-from db_pool import DatabasePool
+logger = logging.getLogger(__name__)
+logger.setLevel(logging.INFO)
 
-MVP_NAMESPACE = uuid.UUID("e6a57005-720d-40c2-b5e0-7ceae1fa7d88")
-
-
-class EmbeddingModelSingleton:
-    _instance: TextEmbedding | None = None
-    _lock: threading.Lock = threading.Lock()
-
-    @classmethod
-    def get_model(cls) -> TextEmbedding:
-        if cls._instance is None:
-            with cls._lock:
-                if cls._instance is None:
-                    cls._instance = TextEmbedding(model_name="BAAI/bge-small-en-v1.5")
-        return cls._instance
-
-
-@dataclass(frozen=True)
-class ExtractedSymbol:
-    id: str
-    name: str
-    symbol_type: str
-    file_path: str
-    scope_path: str
-    signature_hash: str
-    start_line: int
-    end_line: int
-    content: str
-    calls: list[str]
-
-
-def _load_python_language() -> Any:
-    try:
-        return tree_sitter_languages.get_language("python")
-    except TypeError:
-        ext = "dll" if sys.platform == "win32" else ("dylib" if sys.platform == "darwin" else "so")
-        pkg_dir = Path(tree_sitter_languages.__file__).parent
-        lib_path = pkg_dir / f"languages.{ext}"
-        if not lib_path.exists():
-            candidates = list(pkg_dir.glob("languages.*"))
-            if candidates:
-                lib_path = candidates[0]
-            else:
-                raise RuntimeError(
-                    f"Compiled tree-sitter shared library could not be located in {pkg_dir}."
-                )
-
-        cdll = ctypes.CDLL(str(lib_path))
-        func = cdll.tree_sitter_python
-        func.restype = ctypes.c_void_p
-        func.argtypes = []
-        lang_ptr = func()
-        return Language(lang_ptr)
-
-
-def _init_python_parser(python_language: Any) -> Parser:
-    try:
-        parser = Parser(python_language)
-    except (TypeError, ValueError):
-        parser = Parser()
-
-    if getattr(parser, "language", None) != python_language:
-        try:
-            parser.language = python_language
-        except (AttributeError, TypeError):
-            if hasattr(parser, "set_language"):
-                parser.set_language(python_language)
-
-    return parser
+MVP_NAMESPACE = uuid.UUID("a3b8c9d0-e1f2-4a5b-8c9d-0e1f2a3b4c5d")
+EMBEDDING_MODEL_NAME = "BAAI/bge-small-en-v1.5"
+VECTOR_DIMENSION = 384
+QDRANT_COLLECTION_NAME = "mvp_codebase"
 
 
 class PythonStructuralIndexer:
-    def __init__(self, qdrant_url: str | None = None) -> None:
-        target_url = qdrant_url or os.environ.get("QDRANT_URL", "http://qdrant:6333")
-        self.qdrant = QdrantClient(url=target_url)
-        self.embed_model = EmbeddingModelSingleton.get_model()
-        self.language = _load_python_language()
-        self.parser = _init_python_parser(self.language)
-        self._init_qdrant_collection()
+    """
+    Indexes Python codebases using tree-sitter AST parsing, persists structural
+    and dependency graphs into PostgreSQL, and indexes semantic code symbols into Qdrant.
+    """
 
-    def _init_qdrant_collection(self) -> None:
-        collections = [c.name for c in self.qdrant.get_collections().collections]
-        if "mvp_codebase" not in collections:
-            self.qdrant.create_collection(
-                collection_name="mvp_codebase",
-                vectors_config=qmodels.VectorParams(
-                    size=384,
-                    distance=qmodels.Distance.COSINE,
-                ),
-            )
-            self.qdrant.create_payload_index(
-                collection_name="mvp_codebase",
-                field_name="project_id",
-                field_schema=qmodels.PayloadSchemaType.KEYWORD,
-            )
-            self.qdrant.create_payload_index(
-                collection_name="mvp_codebase",
-                field_name="file_path",
-                field_schema=qmodels.PayloadSchemaType.KEYWORD,
-            )
+    def __init__(
+        self,
+        repo_path: str | Path | None = None,
+        repo_dir: str | Path | None = None,
+        postgres_host: str = "postgres",
+        postgres_port: int = 5432,
+        postgres_db: str = "mvp_db",
+        postgres_user: str = "mvp_user",
+        postgres_password: str = "mvp_password",
+        qdrant_url: str = "http://qdrant:6333",
+    ):
+        target_dir = repo_path if repo_path is not None else repo_dir
+        if target_dir is None:
+            target_dir = os.getenv("WORKSPACE_ROOT", "/workspace")
+        self.repo_path = Path(target_dir).resolve()
 
-    def parse_file(self, project_id: str, repo_dir: Path, rel_path: str) -> list[ExtractedSymbol]:
-        full_path = repo_dir / rel_path
-        if full_path.suffix.lower() != ".py" or not full_path.exists():
-            return []
+        self.postgres_params = {
+            "host": postgres_host,
+            "port": postgres_port,
+            "dbname": postgres_db,
+            "user": postgres_user,
+            "password": postgres_password,
+        }
+        self.qdrant_url = qdrant_url
 
-        source_bytes = full_path.read_bytes()
-        tree = self.parser.parse(source_bytes)
-        symbols: list[ExtractedSymbol] = []
-        stack: list[tuple[Any, str]] = [(tree.root_node, "")]
+        self.language = get_language("python")
+        self.parser = get_parser("python")
 
-        while stack:
-            node, current_scope = stack.pop()
-            is_symbol = False
-            symbol_name = ""
-            new_scope = current_scope
+        self.embed_model = TextEmbedding(model_name=EMBEDDING_MODEL_NAME)
+        self.qdrant_client = QdrantClient(url=self.qdrant_url)
 
-            if node.type == "class_definition":
-                name_child = node.child_by_field_name("name")
-                if name_child:
-                    symbol_name = source_bytes[name_child.start_byte : name_child.end_byte].decode(
-                        "utf-8", errors="ignore"
-                    )
-                    new_scope = f"{current_scope}.{symbol_name}" if current_scope else symbol_name
-                    is_symbol = True
-            elif node.type == "function_definition":
-                name_child = node.child_by_field_name("name")
-                if name_child:
-                    symbol_name = source_bytes[name_child.start_byte : name_child.end_byte].decode(
-                        "utf-8", errors="ignore"
-                    )
-                    is_symbol = True
+        self._init_relational_schema()
+        self._init_vector_collection()
 
-            if is_symbol:
-                calls = self._extract_calls(node, source_bytes)
-                content = source_bytes[node.start_byte : node.end_byte].decode(
-                    "utf-8", errors="ignore"
-                )
-                signature_hash = hashlib.sha256(content[:128].encode("utf-8")).hexdigest()[:16]
-                symbol_id = (
-                    f"{project_id}::{rel_path}::{current_scope}::{symbol_name}::{signature_hash}"
-                )
-                symbols.append(
-                    ExtractedSymbol(
-                        id=symbol_id,
-                        name=symbol_name,
-                        symbol_type=node.type,
-                        file_path=rel_path,
-                        scope_path=current_scope,
-                        signature_hash=signature_hash,
-                        start_line=node.start_point[0] + 1,
-                        end_line=node.end_point[0] + 1,
-                        content=content,
-                        calls=calls,
-                    )
-                )
+    def _get_db_connection(self):
+        return psycopg2.connect(**self.postgres_params)
 
-            for child in reversed(node.children):
-                stack.append((child, new_scope))
+    def _init_relational_schema(self) -> None:
+        """
+        Initializes PostgreSQL tables for symbols and directed call graph dependencies.
+        """
+        create_symbols_table = """
+        CREATE TABLE IF NOT EXISTS code_symbols (
+            id VARCHAR(64) PRIMARY KEY,
+            file_path TEXT NOT NULL,
+            name TEXT NOT NULL,
+            symbol_type VARCHAR(32) NOT NULL,
+            start_line INT NOT NULL,
+            end_line INT NOT NULL,
+            content TEXT NOT NULL,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        );
+        CREATE INDEX IF NOT EXISTS idx_code_symbols_file ON code_symbols(file_path);
+        CREATE INDEX IF NOT EXISTS idx_code_symbols_name ON code_symbols(name);
+        """
 
-        return symbols
+        create_dependencies_table = """
+        CREATE TABLE IF NOT EXISTS code_dependencies (
+            id SERIAL PRIMARY KEY,
+            caller_symbol_id VARCHAR(64) NOT NULL REFERENCES code_symbols(id) ON DELETE CASCADE,
+            callee_name TEXT NOT NULL,
+            callee_symbol_id VARCHAR(64) REFERENCES code_symbols(id) ON DELETE SET NULL,
+            file_path TEXT NOT NULL
+        );
+        CREATE INDEX IF NOT EXISTS idx_deps_caller ON code_dependencies(caller_symbol_id);
+        CREATE INDEX IF NOT EXISTS idx_deps_callee_name ON code_dependencies(callee_name);
+        CREATE INDEX IF NOT EXISTS idx_deps_callee_id ON code_dependencies(callee_symbol_id);
+        """
 
-    def _extract_calls(self, parent_node: Any, source_bytes: bytes) -> list[str]:
-        calls: list[str] = []
-        node_stack = [parent_node]
-        while node_stack:
-            curr = node_stack.pop()
-            if curr.type == "call":
-                fn_child = curr.child_by_field_name("function")
-                if fn_child:
-                    calls.append(
-                        source_bytes[fn_child.start_byte : fn_child.end_byte].decode(
-                            "utf-8", errors="ignore"
-                        )
-                    )
-            for c in reversed(curr.children):
-                node_stack.append(c)
-        return calls
-
-    def sync_project_files(self, project_id: str, repo_dir: Path, files_to_sync: list[str]) -> None:
-        if not files_to_sync:
-            return
-
-        all_symbols: list[ExtractedSymbol] = []
-        for rel_path in files_to_sync:
-            all_symbols.extend(self.parse_file(project_id, repo_dir, rel_path))
-
-        for rel_path in files_to_sync:
-            self.qdrant.delete(
-                collection_name="mvp_codebase",
-                points_selector=qmodels.FilterSelector(
-                    filter=qmodels.Filter(
-                        must=[
-                            qmodels.FieldCondition(
-                                key="project_id",
-                                match=qmodels.MatchValue(value=project_id),
-                            ),
-                            qmodels.FieldCondition(
-                                key="file_path",
-                                match=qmodels.MatchValue(value=rel_path),
-                            ),
-                        ]
-                    )
-                ),
-            )
-
-        with DatabasePool.get_connection() as conn:
+        with self._get_db_connection() as conn:
             with conn.cursor() as cur:
-                cur.execute(
-                    """
-                    DELETE FROM code_dependencies
-                    WHERE project_id = %s
-                      AND (
-                          caller_symbol_id IN (
-                              SELECT id FROM code_symbols WHERE project_id = %s AND file_path = ANY(%s)
-                          )
-                          OR callee_symbol_id IN (
-                              SELECT id FROM code_symbols WHERE project_id = %s AND file_path = ANY(%s)
-                          )
-                      );
-                    """,
-                    (project_id, project_id, files_to_sync, project_id, files_to_sync),
-                )
-
-                cur.execute(
-                    "DELETE FROM code_symbols WHERE project_id = %s AND file_path = ANY(%s);",
-                    (project_id, files_to_sync),
-                )
-
-                if all_symbols:
-                    symbol_rows = [
-                        (
-                            s.id,
-                            project_id,
-                            s.file_path,
-                            s.name,
-                            s.symbol_type,
-                            s.scope_path,
-                            s.signature_hash,
-                            s.start_line,
-                            s.end_line,
-                            hashlib.sha256(s.content.encode("utf-8")).hexdigest(),
-                        )
-                        for s in all_symbols
-                    ]
-                    execute_values(
-                        cur,
-                        """
-                        INSERT INTO code_symbols (
-                            id, project_id, file_path, symbol_name, symbol_type,
-                            scope_path, signature_hash, start_line, end_line, content_hash
-                        ) VALUES %s
-                        ON CONFLICT (id) DO UPDATE SET
-                            symbol_type = EXCLUDED.symbol_type,
-                            scope_path = EXCLUDED.scope_path,
-                            start_line = EXCLUDED.start_line,
-                            end_line = EXCLUDED.end_line,
-                            content_hash = EXCLUDED.content_hash,
-                            updated_at = CURRENT_TIMESTAMP;
-                        """,
-                        symbol_rows,
-                    )
-
-                    caller_ids: list[str] = []
-                    callee_names: list[str] = []
-                    caller_files: list[str] = []
-                    proj_ids: list[str] = []
-
-                    for s in all_symbols:
-                        for called_name in s.calls:
-                            caller_ids.append(str(s.id))
-                            callee_names.append(str(called_name))
-                            caller_files.append(str(s.file_path))
-                            proj_ids.append(str(project_id))
-
-                    if caller_ids:
-                        cur.execute(
-                            """
-                            INSERT INTO code_dependencies (caller_symbol_id, callee_symbol_id, project_id)
-                            SELECT DISTINCT
-                                c.caller_id,
-                                cs.id,
-                                c.proj_id
-                            FROM (
-                                SELECT
-                                    v.caller_id,
-                                    v.callee_name,
-                                    v.caller_file,
-                                    v.proj_id
-                                FROM UNNEST(%s::text[], %s::text[], %s::text[], %s::text[])
-                                AS v(caller_id, callee_name, caller_file, proj_id)
-                            ) c
-                            JOIN code_symbols cs
-                              ON cs.project_id = c.proj_id
-                             AND (
-                                  (cs.file_path = c.caller_file AND cs.symbol_name = c.callee_name)
-                                  OR (
-                                      c.callee_name = (
-                                          CASE 
-                                              WHEN cs.scope_path IS NULL OR cs.scope_path = '' THEN cs.symbol_name 
-                                              ELSE cs.scope_path || '.' || cs.symbol_name 
-                                          END
-                                      )
-                                      AND POSITION('.' IN c.callee_name) > 0
-                                  )
-                             )
-                            ON CONFLICT DO NOTHING;
-                            """,
-                            (caller_ids, callee_names, caller_files, proj_ids),
-                        )
+                cur.execute(create_symbols_table)
+                cur.execute(create_dependencies_table)
             conn.commit()
 
-        if all_symbols:
-            texts = [
-                f"Symbol: {s.name} ({s.symbol_type}) in {s.file_path}\nCode:\n{s.content}"
-                for s in all_symbols
+    def _init_vector_collection(self) -> None:
+        """
+        Initializes the vector collection in Qdrant if it does not already exist.
+        """
+        collections = self.qdrant_client.get_collections().collections
+        collection_names = [col.name for col in collections]
+
+        if QDRANT_COLLECTION_NAME not in collection_names:
+            self.qdrant_client.create_collection(
+                collection_name=QDRANT_COLLECTION_NAME,
+                vectors_config=VectorParams(
+                    size=VECTOR_DIMENSION,
+                    distance=Distance.COSINE,
+                ),
+            )
+
+    def _extract_symbols_and_calls(
+        self, file_path: str, code_content: str
+    ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+        """
+        Parses Python code using tree-sitter to extract definitions and call references.
+        """
+        tree = self.parser.parse(bytes(code_content, "utf8"))
+        symbols: list[dict[str, Any]] = []
+        calls: list[dict[str, Any]] = []
+
+        def traverse_node(node, current_enclosing_symbol: str | None = None):
+            symbol_id = current_enclosing_symbol
+
+            if node.type in ("function_definition", "class_definition"):
+                name_node = node.child_by_field_name("name")
+                if name_node:
+                    raw_name = name_node.text.decode("utf8")
+                    symbol_type = "function" if node.type == "function_definition" else "class"
+                    start_line = node.start_point[0] + 1
+                    end_line = node.end_point[0] + 1
+                    snippet = code_content.splitlines()[start_line - 1 : end_line]
+                    content_str = "\n".join(snippet)
+
+                    generated_id = f"{file_path}::{raw_name}::{start_line}"
+                    symbol_entry = {
+                        "id": generated_id,
+                        "file_path": file_path,
+                        "name": raw_name,
+                        "symbol_type": symbol_type,
+                        "start_line": start_line,
+                        "end_line": end_line,
+                        "content": content_str,
+                    }
+                    symbols.append(symbol_entry)
+                    symbol_id = generated_id
+
+            if node.type == "call":
+                func_node = node.child_by_field_name("function")
+                if func_node:
+                    callee_text = func_node.text.decode("utf8")
+                    call_name = callee_text.split(".")[-1]
+                    if current_enclosing_symbol:
+                        calls.append(
+                            {
+                                "caller_symbol_id": current_enclosing_symbol,
+                                "callee_name": call_name,
+                                "file_path": file_path,
+                            }
+                        )
+
+            for child in node.children:
+                traverse_node(child, symbol_id)
+
+        traverse_node(tree.root_node)
+        return symbols, calls
+
+    def sync_project_files(
+        self,
+        files_to_sync: list[str] | None = None,
+        repo_dir: str | Path | None = None,
+    ) -> None:
+        """
+        Deterministic incremental sync triggered when a Git delta exists.
+        If files_to_sync is empty, execution returns immediately.
+        """
+        if repo_dir is not None:
+            self.repo_path = Path(repo_dir).resolve()
+
+        if files_to_sync is not None and len(files_to_sync) == 0:
+            logger.info("No delta detected. Skipping structural and vector reindexing.")
+            return
+
+        target_files: list[Path] = []
+        if files_to_sync is not None:
+            for rel_file in files_to_sync:
+                full_path = self.repo_path / rel_file
+                if full_path.suffix == ".py" and full_path.is_file():
+                    target_files.append(full_path)
+        else:
+            target_files = [
+                p
+                for p in self.repo_path.rglob("*.py")
+                if not any(part.startswith(".") for part in p.parts)
             ]
-            vectors = list(self.embed_model.embed(texts))
-            points = []
-            for s, vec in zip(all_symbols, vectors):
-                point_uuid = str(uuid.uuid5(MVP_NAMESPACE, s.id))
-                points.append(
-                    qmodels.PointStruct(
-                        id=point_uuid,
-                        vector=vec.tolist(),
-                        payload={
-                            "symbol_id": s.id,
-                            "project_id": project_id,
-                            "file_path": s.file_path,
-                            "name": s.name,
-                            "content": s.content,
-                        },
+
+        if not target_files:
+            logger.info("No valid Python files to index.")
+            return
+
+        for path_obj in target_files:
+            rel_path = str(path_obj.relative_to(self.repo_path))
+            try:
+                code = path_obj.read_text(encoding="utf-8", errors="replace")
+            except Exception as e:
+                logger.warning("Failed reading file %s: %s", rel_path, e)
+                continue
+
+            extracted_symbols, extracted_calls = self._extract_symbols_and_calls(rel_path, code)
+
+            with self._get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    cur.execute("DELETE FROM code_symbols WHERE file_path = %s;", (rel_path,))
+                conn.commit()
+
+            if not extracted_symbols:
+                continue
+
+            insert_symbol_sql = """
+            INSERT INTO code_symbols (id, file_path, name, symbol_type, start_line, end_line, content)
+            VALUES (%s, %s, %s, %s, %s, %s, %s)
+            ON CONFLICT (id) DO UPDATE SET
+                content = EXCLUDED.content,
+                start_line = EXCLUDED.start_line,
+                end_line = EXCLUDED.end_line,
+                updated_at = CURRENT_TIMESTAMP;
+            """
+            symbol_records = [
+                (
+                    s["id"],
+                    s["file_path"],
+                    s["name"],
+                    s["symbol_type"],
+                    s["start_line"],
+                    s["end_line"],
+                    s["content"],
+                )
+                for s in extracted_symbols
+            ]
+
+            with self._get_db_connection() as conn:
+                with conn.cursor() as cur:
+                    psycopg2.extras.execute_batch(cur, insert_symbol_sql, symbol_records)
+                conn.commit()
+
+            contents_to_embed = [
+                f"{s['symbol_type']} {s['name']} in {s['file_path']}:\n{s['content']}"
+                for s in extracted_symbols
+            ]
+            embeddings = list(self.embed_model.embed(contents_to_embed))
+
+            qdrant_points: list[PointStruct] = []
+            for s, vector in zip(extracted_symbols, embeddings, strict=False):
+                point_id = str(uuid.uuid5(MVP_NAMESPACE, s["id"]))
+                payload = {
+                    "symbol_id": s["id"],
+                    "name": s["name"],
+                    "file_path": s["file_path"],
+                    "symbol_type": s["symbol_type"],
+                    "start_line": s["start_line"],
+                    "end_line": s["end_line"],
+                    "content": s["content"],
+                }
+                qdrant_points.append(
+                    PointStruct(
+                        id=point_id,
+                        vector=vector.tolist(),
+                        payload=payload,
                     )
                 )
-            self.qdrant.upsert(collection_name="mvp_codebase", points=points)
 
-    def query_semantic_bug_sources(
-        self, project_id: str, bug_description: str, top_k: int = 5
+            self.qdrant_client.upsert(
+                collection_name=QDRANT_COLLECTION_NAME,
+                points=qdrant_points,
+            )
+
+            insert_dep_sql = """
+            INSERT INTO code_dependencies (caller_symbol_id, callee_name, callee_symbol_id, file_path)
+            VALUES (%s, %s, (
+                SELECT id FROM code_symbols WHERE name = %s LIMIT 1
+            ), %s);
+            """
+            dep_records = [
+                (c["caller_symbol_id"], c["callee_name"], c["callee_name"], c["file_path"])
+                for c in extracted_calls
+            ]
+
+            if dep_records:
+                with self._get_db_connection() as conn:
+                    with conn.cursor() as cur:
+                        psycopg2.extras.execute_batch(cur, insert_dep_sql, dep_records)
+                    conn.commit()
+
+        logger.info("Indexed %d Python files into PostgreSQL and Qdrant.", len(target_files))
+
+    def _fetch_dependent_callers(
+        self, symbol_ids: list[str], max_depth: int = 2
+    ) -> dict[str, list[str]]:
+        """
+        Performs recursive CTE traversal in PostgreSQL to determine callers of symbols.
+        """
+        if not symbol_ids:
+            return {}
+
+        query = """
+        WITH RECURSIVE caller_hierarchy AS (
+            SELECT
+                d.callee_symbol_id AS root_target_id,
+                d.caller_symbol_id AS direct_caller_id,
+                1 AS depth
+            FROM code_dependencies d
+            WHERE d.callee_symbol_id = ANY(%s)
+
+            UNION
+
+            SELECT
+                ch.root_target_id,
+                d.caller_symbol_id,
+                ch.depth + 1
+            FROM code_dependencies d
+            JOIN caller_hierarchy ch ON d.callee_symbol_id = ch.direct_caller_id
+            WHERE ch.depth < %s
+        )
+        SELECT
+            ch.root_target_id,
+            s.name AS caller_name,
+            s.file_path,
+            s.start_line
+        FROM caller_hierarchy ch
+        JOIN code_symbols s ON s.id = ch.direct_caller_id
+        GROUP BY ch.root_target_id, s.name, s.file_path, s.start_line;
+        """
+
+        result: dict[str, list[str]] = {sid: [] for sid in symbol_ids}
+        with self._get_db_connection() as conn:
+            with conn.cursor() as cur:
+                cur.execute(query, (symbol_ids, max_depth))
+                rows = cur.fetchall()
+                for root_id, caller_name, file_path, start_line in rows:
+                    caller_descriptor = f"{caller_name} ({file_path}:{start_line})"
+                    if caller_descriptor not in result[root_id]:
+                        result[root_id].append(caller_descriptor)
+
+        return result
+
+    def query_semantic_sources(
+        self,
+        issue_description: str,
+        top_k: int = 5,
+        max_caller_depth: int = 2,
     ) -> dict[str, Any]:
-        query_vec = list(self.embed_model.embed([bug_description]))[0].tolist()
-        hits = self.qdrant.search(
-            collection_name="mvp_codebase",
-            query_vector=query_vec,
-            query_filter=qmodels.Filter(
-                must=[
-                    qmodels.FieldCondition(
-                        key="project_id", match=qmodels.MatchValue(value=project_id)
-                    )
-                ]
-            ),
+        """
+        Retrieves relevant symbols via Qdrant query_points and maps their blast radius.
+        """
+        query_embedding = list(self.embed_model.embed([issue_description]))[0]
+
+        search_response = self.qdrant_client.query_points(
+            collection_name=QDRANT_COLLECTION_NAME,
+            query=query_embedding.tolist(),
             limit=top_k,
         )
 
-        results = []
-        with DatabasePool.get_connection() as conn:
+        matched_symbols: list[dict[str, Any]] = []
+        symbol_ids: list[str] = []
+
+        for hit in search_response.points:
+            payload = hit.payload or {}
+            sid = payload.get("symbol_id")
+            if sid:
+                sid_str = str(sid)
+                symbol_ids.append(sid_str)
+                matched_symbols.append(
+                    {
+                        "symbol_id": sid_str,
+                        "name": payload.get("name"),
+                        "file_path": payload.get("file_path"),
+                        "symbol_type": payload.get("symbol_type"),
+                        "start_line": payload.get("start_line"),
+                        "end_line": payload.get("end_line"),
+                        "content": payload.get("content"),
+                        "similarity_score": hit.score,
+                    }
+                )
+
+        blast_radius = self._fetch_dependent_callers(symbol_ids, max_depth=max_caller_depth)
+
+        for sym in matched_symbols:
+            sym["dependent_callers"] = blast_radius.get(sym["symbol_id"], [])
+
+        return {
+            "query": issue_description,
+            "semantic_sources": matched_symbols,
+        }
+
+    def get_symbol_blast_radius(self, symbol_name: str, max_depth: int = 3) -> dict[str, Any]:
+        """
+        Computes blast radius and dependent callers for a given symbol name.
+        """
+        query = "SELECT id, file_path, symbol_type, start_line, end_line FROM code_symbols WHERE name = %s;"
+        symbols: list[dict[str, Any]] = []
+        with self._get_db_connection() as conn:
             with conn.cursor() as cur:
-                for hit in hits:
-                    payload = hit.payload or {}
-                    sym_id = payload.get("symbol_id", "")
-                    cur.execute(
-                        """
-                        WITH RECURSIVE callers AS (
-                            SELECT caller_symbol_id, 1 as depth
-                            FROM code_dependencies
-                            WHERE callee_symbol_id = %s AND project_id = %s
-                            UNION
-                            SELECT cd.caller_symbol_id, c.depth + 1
-                            FROM code_dependencies cd
-                            JOIN callers c ON cd.callee_symbol_id = c.caller_symbol_id
-                            WHERE c.depth < 2 AND cd.project_id = %s
-                        )
-                        SELECT DISTINCT cs.id, cs.file_path, cs.symbol_name
-                        FROM callers cl
-                        JOIN code_symbols cs ON cs.id = cl.caller_symbol_id AND cs.project_id = %s;
-                        """,
-                        (sym_id, project_id, project_id, project_id),
-                    )
-                    callers = [f"{row[2]} ({row[1]})" for row in cur.fetchall()]
-                    results.append(
+                cur.execute(query, (symbol_name,))
+                for sid, file_path, symbol_type, start_line, end_line in cur.fetchall():
+                    symbols.append(
                         {
-                            "file_path": payload.get("file_path"),
-                            "name": payload.get("name"),
-                            "content": payload.get("content"),
-                            "dependent_callers": callers,
+                            "symbol_id": sid,
+                            "file_path": file_path,
+                            "symbol_type": symbol_type,
+                            "start_line": start_line,
+                            "end_line": end_line,
                         }
                     )
 
-        return {"semantic_sources": results}
+        if not symbols:
+            return {
+                "symbol_name": symbol_name,
+                "found": False,
+                "callers": [],
+            }
+
+        symbol_ids = [s["symbol_id"] for s in symbols]
+        blast_map = self._fetch_dependent_callers(symbol_ids, max_depth=max_depth)
+
+        combined_callers: list[str] = []
+        for sid in symbol_ids:
+            for caller in blast_map.get(sid, []):
+                if caller not in combined_callers:
+                    combined_callers.append(caller)
+
+        return {
+            "symbol_name": symbol_name,
+            "found": True,
+            "definitions": symbols,
+            "dependent_callers": combined_callers,
+        }

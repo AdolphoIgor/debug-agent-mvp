@@ -32,5 +32,3 @@ COPY . .
 RUN uv pip install --system --no-deps -e .
 
 EXPOSE 8080
-
-CMD ["python", "src/mcp_db_server.py"]

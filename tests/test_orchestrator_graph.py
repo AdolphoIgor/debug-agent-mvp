@@ -1,184 +1,125 @@
-from __future__ import annotations
-
-import subprocess
-from pathlib import Path
 from unittest.mock import MagicMock, patch
 
 import pytest
-from google.genai import errors
 
-from orchestrator_graph import (
-    AntagonistAudit,
-    AssistantPatch,
-    ExecutionLockManager,
-    OrchestratorState,
-    build_mvp_showcase_graph,
+from src.orchestrator_graph import (
+    WorkflowState,
     node_blind_auditor,
+    node_publish_and_index,
     node_sandbox_execution,
-    route_after_audit,
-    route_after_consultant,
     route_after_sandbox,
 )
 
 
-@patch("fcntl.flock")
-def test_execution_lock_manager_lifecycle(
-    mock_flock: MagicMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    test_lock_file = tmp_path / "test_exec.lock"
-    monkeypatch.setattr("orchestrator_graph.LOCK_FILE_PATH", test_lock_file)
-
-    # Simulate the sequential calls to fcntl.flock to trigger the contention failure on the second acquire
-    mock_flock.side_effect = [
-        None,  # 1st acquire (success)
-        BlockingIOError("Locked"),  # 2nd acquire (fails simulating contention)
-        None,  # release
-        None,  # 3rd acquire (success)
-        None,  # final release
-    ]
-
-    ExecutionLockManager.release()
-    ExecutionLockManager.acquire()
-    assert test_lock_file.exists()
-
-    with pytest.raises(
-        RuntimeError, match="Another active orchestration process holds the global system lock"
-    ):
-        ExecutionLockManager.acquire()
-
-    ExecutionLockManager.release()
-    ExecutionLockManager.acquire()
-    ExecutionLockManager.release()
-
-
-def test_assistant_patch_schema_validation() -> None:
-    valid_payload = {
-        "analysis": "Identified zero division bug.",
-        "unified_diff": "--- a/math.py\n+++ b/math.py\n@@ -1 +1 @@\n-return 1/x\n+return 1/x if x != 0 else 0",
-        "unit_test_rel_path": "tests/test_math.py",
-        "unit_test_code": "def test_zero_div(): assert True",
+@pytest.fixture
+def base_state() -> WorkflowState:
+    return {
+        "issue_id": "CORE-102",
+        "problem_statement": "Prevent ZeroDivisionError when item count is zero",
+        "current_phase": "reproduction",
+        "is_test_locked": False,
+        "locked_test_path": "",
+        "locked_test_code": "",
+        "candidate_test_path": "tests/test_reproduce_core_102.py",
+        "candidate_test_code": "def test_zero_count():\n    assert False\n",
+        "candidate_patch": "",
+        "database_migration_artifacts": [],
+        "audit_verdict": "PENDING",
+        "auditor_critique": "",
+        "programmer_feedback": "",
+        "sandbox_passed": False,
+        "sandbox_output": "",
+        "stagnation_counter": 0,
+        "consultant_cycles": 0,
+        "consultant_guidance": "",
+        "target_branch": "",
+        "commit_message": "",
+        "final_solution": "",
+        "execution_status": "IN_PROGRESS",
     }
-    patch_obj = AssistantPatch.model_validate(valid_payload)
-    assert patch_obj.unit_test_rel_path == "tests/test_math.py"
-    assert "zero division" in patch_obj.analysis
 
 
-def test_route_after_audit_transitions() -> None:
-    approved_state: OrchestratorState = {
-        "last_audit": AntagonistAudit(verdict="APPROVE", critique="Valid logic."),
-        "stagnation_counter": 0,
-    }  # type: ignore[typeddict-item]
-    assert route_after_audit(approved_state) == "node_sandbox_execution"
+def test_sandbox_freezes_test_on_reproduction_failure(base_state, tmp_path, monkeypatch):
+    monkeypatch.setattr("src.orchestrator_graph.WORKSPACE_ROOT", tmp_path)
 
-    rejected_retry_state: OrchestratorState = {
-        "last_audit": AntagonistAudit(verdict="REJECT", critique="Missing mocks."),
-        "stagnation_counter": 1,
-    }  # type: ignore[typeddict-item]
-    assert route_after_audit(rejected_retry_state) == "node_programmer"
+    with patch.object(
+        type("MockSandbox", (), {}), "run_hermetic_pytest", return_value=(1, "FAILED (failures=1)")
+    ):
+        with patch("src.orchestrator_graph.PythonHermeticSandbox.run_hermetic_pytest") as mock_exec:
+            mock_exec.return_value = (1, "FAILED tests/test_reproduce_core_102.py - AssertionError")
 
-    rejected_stagnated_state: OrchestratorState = {
-        "last_audit": AntagonistAudit(verdict="REJECT", critique="Repeated failure."),
-        "stagnation_counter": 3,
-    }  # type: ignore[typeddict-item]
-    assert route_after_audit(rejected_stagnated_state) == "node_consultant"
+            updates = node_sandbox_execution(base_state)
 
-
-def test_route_after_consultant_transitions() -> None:
-    active_cycle_state: OrchestratorState = {"consultant_cycle_counter": 1}  # type: ignore[typeddict-item]
-    assert route_after_consultant(active_cycle_state) == "node_programmer"
-
-    exhausted_cycle_state: OrchestratorState = {"consultant_cycle_counter": 3}  # type: ignore[typeddict-item]
-    assert route_after_consultant(exhausted_cycle_state) == "node_archive_failure"
+            assert updates["sandbox_passed"] is True
+            assert updates["is_test_locked"] is True
+            assert updates["current_phase"] == "resolution"
+            assert updates["locked_test_path"] == base_state["candidate_test_path"]
+            assert updates["stagnation_counter"] == 0
+            assert updates["consultant_cycles"] == 0
 
 
-def test_route_after_sandbox_transitions() -> None:
-    passed_state: OrchestratorState = {"tests_passed": True}  # type: ignore[typeddict-item]
-    assert route_after_sandbox(passed_state) == "node_publish_and_index"
-
-    failed_retry_state: OrchestratorState = {
-        "tests_passed": False,
-        "stagnation_counter": 1,
-    }  # type: ignore[typeddict-item]
-    assert route_after_sandbox(failed_retry_state) == "node_programmer"
-
-    failed_stagnated_state: OrchestratorState = {
-        "tests_passed": False,
-        "stagnation_counter": 3,
-    }  # type: ignore[typeddict-item]
-    assert route_after_sandbox(failed_stagnated_state) == "node_consultant"
-
-
-@patch("orchestrator_graph.get_quota_pool")
-def test_node_blind_auditor_reports_quota_exhaustion_on_429(mock_get_pool: MagicMock) -> None:
-    mock_pool = MagicMock()
-    mock_pool.get_active_model.return_value = "gemini-1.5-pro"
-    mock_client = MagicMock()
-
-    # APIError requires both a message and a response argument
-    api_error = errors.APIError("Rate limit reached", MagicMock())
-    api_error.code = 429
-    mock_client.models.generate_content.side_effect = api_error
-
-    mock_pool.client = mock_client
-    mock_get_pool.return_value = mock_pool
-
-    state: OrchestratorState = {
-        "current_patch": AssistantPatch(
-            analysis="test",
-            unified_diff="",
-            unit_test_rel_path="test_a.py",
-            unit_test_code="",
-        ),
-        "stagnation_counter": 0,
-    }  # type: ignore[typeddict-item]
-
-    with pytest.raises(errors.APIError):
-        node_blind_auditor(state)
-
-    mock_pool.report_exhaustion.assert_called_once_with("gemini-1.5-pro")
-
-
-@patch("orchestrator_graph.PythonHermeticSandbox")
-@patch("subprocess.run")
-def test_node_sandbox_execution_success(
-    mock_sub_run: MagicMock,
-    mock_sandbox_cls: MagicMock,
-    mock_workspace: Path,
-) -> None:
-    mock_sandbox_instance = MagicMock()
-    mock_sandbox_instance.apply_patch.return_value = subprocess.CompletedProcess(
-        args=[], returncode=0, stdout="", stderr=""
-    )
-    mock_sandbox_instance.run_pytest.return_value = MagicMock(
-        returncode=0, stdout="OK", stderr="", timed_out=False
-    )
-    mock_sandbox_cls.return_value = mock_sandbox_instance
-
-    state: OrchestratorState = {
-        "ticket_id": "T-100",
-        "workspace_path": str(mock_workspace),
-        "current_patch": AssistantPatch(
-            analysis="Analysis",
-            unified_diff="--- a\n+++ b",
-            unit_test_rel_path="tests/test_fix.py",
-            unit_test_code="def test_fix(): pass",
-        ),
-        "stagnation_counter": 0,
-    }  # type: ignore[typeddict-item]
-
-    result = node_sandbox_execution(state)
-
-    assert result["tests_passed"] is True
-    assert result["stagnation_counter"] == 0
-    mock_sandbox_instance.write_test_file_securely.assert_called_once_with(
-        "tests/test_fix.py", "def test_fix(): pass"
+def test_auditor_rejects_patch_modifying_locked_test(base_state):
+    base_state["current_phase"] = "resolution"
+    base_state["is_test_locked"] = True
+    base_state["locked_test_path"] = "tests/test_locked.py"
+    base_state["candidate_patch"] = (
+        "--- a/tests/test_locked.py\n+++ b/tests/test_locked.py\n@@ -1,1 +1,1 @@\n-assert False\n+assert True\n"
     )
 
+    mock_response = MagicMock()
+    mock_response.text = '{"audit_verdict": "APPROVE", "critique": "Looks fine"}'
 
-def test_build_mvp_showcase_graph_compilation() -> None:
-    graph = build_mvp_showcase_graph()
-    app = graph.compile()
-    assert app is not None
-    assert "node_acquire_execution_lock" in app.nodes
-    assert "node_publish_and_index" in app.nodes
-    assert "node_archive_failure" in app.nodes
+    with patch("google.genai.Client") as mock_client_cls:
+        mock_client = MagicMock()
+        mock_client_cls.return_value = mock_client
+        mock_client.models.generate_content.return_value = mock_response
+
+        updates = node_blind_auditor(base_state)
+
+        # Enforce that auditor strictly overrides verdict if locked test file is modified
+        assert updates["audit_verdict"] == "REJECT"
+        assert "Security violation" in updates["auditor_critique"]
+        assert updates["stagnation_counter"] == 1
+
+
+def test_publish_creates_timestamped_branch(base_state, tmp_path, monkeypatch):
+    monkeypatch.setattr("src.orchestrator_graph.WORKSPACE_ROOT", tmp_path)
+    base_state["current_phase"] = "resolution"
+    base_state["is_test_locked"] = True
+    base_state["locked_test_path"] = "tests/test_frozen.py"
+    base_state["locked_test_code"] = "def test_ok(): pass\n"
+    base_state["candidate_patch"] = ""
+    base_state["database_migration_artifacts"] = ["migrations/001_initial.sql"]
+
+    with patch("subprocess.run") as mock_run:
+        mock_run.return_value = MagicMock(returncode=0, stdout="", stderr="")
+
+        updates = node_publish_and_index(base_state)
+
+        assert updates["execution_status"] == "SUCCESS"
+        assert updates["target_branch"].startswith("fix/issue-core-102-")
+        assert "Database migration artifacts" in updates["commit_message"]
+
+
+def test_routing_reproduction_phase():
+    state: WorkflowState = {
+        "current_phase": "reproduction",
+        "sandbox_passed": True,
+        "stagnation_counter": 0,
+        "consultant_cycles": 0,
+    }  # type: ignore
+
+    # When reproduction succeeds, sandbox routes back to programmer to initiate phase 2
+    assert route_after_sandbox(state) == "node_programmer"
+
+
+def test_routing_resolution_phase_success():
+    state: WorkflowState = {
+        "current_phase": "resolution",
+        "sandbox_passed": True,
+        "stagnation_counter": 0,
+        "consultant_cycles": 0,
+    }  # type: ignore
+
+    # When resolution succeeds, sandbox routes straight to autonomous publishing
+    assert route_after_sandbox(state) == "node_publish_and_index"

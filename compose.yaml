@@ -36,12 +36,12 @@ services:
     container_name: mvp_postgres
     restart: unless-stopped
     environment:
-      POSTGRES_DB: client_baseline_db
-      POSTGRES_USER: mvp_user
-      POSTGRES_PASSWORD: mvp_password
+      POSTGRES_USER: ${POSTGRES_USER:-mvp_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mvp_password}
+      POSTGRES_DB: ${POSTGRES_DB:-mvp_db}
       PGDATA: /var/lib/postgresql/data/pgdata
     ports:
-      - "5432:5432"
+      - "${POSTGRES_PORT:-5432}:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
       - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
@@ -76,22 +76,28 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: mvp-mcp-server:latest
     container_name: mvp_mcp_server
-    pull_policy: build
     restart: unless-stopped
-    ports:
-      - "8080:8080"
+    command: [ "python", "src/mcp_code_server.py" ]
     environment:
-      TARGET_DB_URL: postgresql://mvp_user:mvp_password@postgres:5432/client_baseline_db
-      PYTHONUNBUFFERED: "1"
-      FASTMCP_HOST: "0.0.0.0"
-      FASTMCP_PORT: "8080"
-      MCP_HOST: "0.0.0.0"
-      MCP_PORT: "8080"
+      WORKSPACE_ROOT: /workspace
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-mvp_db}
+      POSTGRES_USER: ${POSTGRES_USER:-mvp_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mvp_password}
+      QDRANT_URL: http://qdrant:6333
+      MCP_SERVER_HOST: 0.0.0.0
+      MCP_SERVER_PORT: 8080
+    volumes:
+      - .:/workspace
+    ports:
+      - "${MCP_SERVER_HOST_PORT:-8081}:8080"
     depends_on:
       postgres:
         condition: service_healthy
+      qdrant:
+        condition: service_started
     networks:
       - mvp_global_net
 
@@ -104,6 +110,45 @@ services:
     pull_policy: build
     restart: "no"
     network_mode: none
+
+  app:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    image: mvp-base:latest
+    container_name: mvp_orchestrator_app
+    command: [ "pytest", "-q" ]
+    environment:
+      WORKSPACE_ROOT: /workspace
+      POSTGRES_HOST: postgres
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: ${POSTGRES_DB:-mvp_db}
+      POSTGRES_USER: ${POSTGRES_USER:-mvp_user}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mvp_password}
+      QDRANT_URL: http://qdrant:6333
+      MCP_SERVER_SSE_URL: http://mcp-server:8080/sse
+      GEMINI_API_KEY: ${GEMINI_API_KEY}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY}
+      GCP_PROJECT_ID: ${GCP_PROJECT_ID}
+      SANDBOX_IMAGE: ${SANDBOX_IMAGE:-mvp-sandbox:latest}
+      SANDBOX_TIMEOUT_SEC: ${SANDBOX_TIMEOUT_SEC:-120}
+      PYTHONPATH: /workspace:/workspace/src
+    volumes:
+      - .:/workspace
+      - /var/run/docker.sock:/var/run/docker.sock
+    depends_on:
+      - mcp-server
+    networks:
+      - mvp_global_net
+
+  sandbox:
+    build:
+      context: .
+      dockerfile: Dockerfile.sandbox
+    image: ${SANDBOX_IMAGE:-mvp-sandbox:latest}
+    profiles:
+      - tools
+      - sandbox
 
 networks:
   mvp_global_net:
