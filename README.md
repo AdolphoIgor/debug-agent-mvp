@@ -16,6 +16,14 @@ The **Autonomous Debugging Agent MVP** solves this paradigm failure. It implemen
 
 Designed with an emphasis on systems engineering, operational resilience, and defense-in-depth security, this project showcases production-ready architectural patterns for enterprise LLMOps and agentic automation.
 
+## Workflow Flowchart (English)
+
+![Complete Workflow Flowchart for the Autonomous Debug Agent (English)](docs/images/autonomous_workflow_en.jpeg)
+
+## Fluxograma do Fluxo de Depuração Autônomo (Português)
+
+![Fluxograma Completo do Fluxo de Trabalho do Agente de Depuração Autônomo (Português)](docs/images/autonomous_workflow_pt.jpeg)
+
 ## The Engineering Challenge & Problem Space
 
 Building an autonomous agent that touches production-grade code introduces critical challenges that naive LLM scripts cannot address:
