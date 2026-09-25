@@ -42,7 +42,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: mvp-base:latest
+    image: mcp-server:latest
     container_name: mvp_mcp_server
     restart: unless-stopped
     command: [ "python", "src/mcp_code_server.py" ]
@@ -72,7 +72,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    image: mvp-base:latest
+    image: orchestrator-app:latest
     container_name: mvp_orchestrator_app
     restart: unless-stopped
     command: [ "python", "-m", "uvicorn", "src.api_server:app", "--host", "0.0.0.0", "--port", "8000" ]

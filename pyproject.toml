@@ -12,45 +12,44 @@ license = { text = "Apache-2.0" }
 authors = [
     { name = "Adolpho Igor Benazzi Rodrigues" }
 ]
-
 dependencies = [
-    "langgraph>=0.6.0",
-    "psycopg2-binary>=2.9.10",
-    "google-genai>=0.8.0",
     "pydantic>=2.10.0",
-    "qdrant-client>=1.12.0",
-    "fastembed>=0.4.0",
-    "tree-sitter-languages>=1.10.0",
-    "mcp[cli]>=1.2.0,<2.0.0",
     "httpx>=0.28.0",
     "python-dotenv>=1.0.1",
     "typing-extensions>=4.12.0",
+]
+
+[project.optional-dependencies]
+# Dependencies unique to the MCP Sidecar
+mcp = [
+    "mcp[cli]>=1.2.0,<2.0.0",
+    "fastembed>=0.4.0",
+    "tree-sitter<0.22.0",
+    "tree-sitter-languages>=1.10.0",
+    "psycopg2-binary>=2.9.10",
+    "qdrant-client>=1.12.0",
+]
+
+# Dependencies unique to the Orchestrator API
+orchestrator = [
+    "langgraph>=0.6.0",
+    "google-genai>=0.8.0",
     "fastapi>=0.115.0",
     "uvicorn[standard]>=0.32.0",
 ]
 
-[project.optional-dependencies]
+# Everything for dev environment
 dev = [
+    "debug-agent-mvp[mcp,orchestrator]",
     "langgraph-cli[inmem]>=0.4.31",
     "langgraph-api>=0.14.3",
     "pytest>=8.3.0",
     "pytest-asyncio>=0.24.0",
+    "pytest-cov>=6.0.0",
+    "pytest-mock>=3.14.0",
     "debugpy>=1.8.0",
     "ruff>=0.8.0",
     "mypy>=1.13.0",
-    "pytest-mock>=3.14.0",
-]
-
-[dependency-groups]
-dev = [
-    "pytest>=8.3.0",
-    "pytest-asyncio>=0.24.0",
-    "debugpy>=1.8.0",
-    "mypy>=1.13.0",
-    "ruff>=0.8.0",
-    "langgraph-cli[inmem]>=0.4.31",
-    "langgraph-api>=0.14.3",
-    "pytest-mock>=3.14.0",
 ]
 
 [tool.hatch.build.targets.wheel]
@@ -58,7 +57,7 @@ packages = ["src"]
 
 [tool.pytest.ini_options]
 minversion = "8.0"
-addopts = "-q -ra --strict-markers --disable-warnings"
+addopts = "-q -ra --strict-markers --disable-warnings --cov=src --cov-report=term-missing --cov-report=xml"
 testpaths = ["tests"]
 python_files = ["test_*.py"]
 python_classes = ["Test*"]
@@ -67,6 +66,25 @@ pythonpath = [".", "src"]
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::UserWarning",
+]
+
+[tool.coverage.run]
+source = ["src"]
+branch = true
+omit = [
+    "src/__pycache__/*",
+]
+
+[tool.coverage.report]
+show_missing = true
+fail_under = 80
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "if self.debug:",
+    "if __name__ == .__main__.:",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
 ]
 
 [tool.ruff]
