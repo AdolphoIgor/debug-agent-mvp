@@ -19,6 +19,7 @@ Designed with an emphasis on systems engineering, operational resilience, and de
 ## Workflow Flowchart (English)
 
 ```mermaid
+
     flowchart TD
         classDef startNode fill:#2563eb,stroke:#1d4ed8,color:#ffffff,stroke-width:2px;
         classDef syncNode fill:#7c3aed,stroke:#6d28d9,color:#ffffff,stroke-width:2px;

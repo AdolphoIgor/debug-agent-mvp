@@ -1,36 +1,4 @@
 services:
-
-  api-gateway:
-    build:
-      context: .
-      dockerfile: Dockerfile
-    image: mvp-api-gateway:latest
-    container_name: mvp_api_gateway
-    restart: unless-stopped
-    command: [ "uvicorn", "src.api_server:app", "--host", "0.0.0.0", "--port", "8000" ]
-    ports:
-      - "8000:8000"
-    environment:
-      - PYTHONPATH=src
-      - DATABASE_URL=postgresql://mvp_user:mvp_password@postgres:5432/client_baseline_db
-      - QDRANT_URL=http://qdrant:6333
-      - MCP_SERVER_SSE_URL=http://mcp-server:8080/sse
-      - SANDBOX_IMAGE=mvp-sandbox:latest
-      - DOCKER_NETWORK_NAME=mvp_global_net
-      - WORKSPACE_BASE_DIR=/tmp/mvp_workspaces
-    volumes:
-      - /var/run/docker.sock:/var/run/docker.sock
-      - /tmp/mvp_workspaces:/tmp/mvp_workspaces
-    depends_on:
-      postgres:
-        condition: service_healthy
-      qdrant:
-        condition: service_healthy
-      mcp-server:
-        condition: service_started
-    networks:
-      - mvp_global_net
-
   postgres:
     image: postgres:16-alpine
     container_name: mvp_postgres
@@ -46,7 +14,7 @@ services:
       - postgres_data:/var/lib/postgresql/data
       - ./database/schema.sql:/docker-entrypoint-initdb.d/01-schema.sql:ro
     healthcheck:
-      test: [ "CMD-SHELL", "pg_isready -U mvp_user -d client_baseline_db" ]
+      test: [ "CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-mvp_user} -d ${POSTGRES_DB:-mvp_db}" ]
       interval: 5s
       timeout: 5s
       retries: 5
@@ -55,20 +23,18 @@ services:
       - mvp_global_net
 
   qdrant:
-    image: qdrant/qdrant:v1.9.0
+    image: qdrant/qdrant:v1.12.0
     container_name: mvp_qdrant
     restart: unless-stopped
     ports:
-      - "6333:6333"
-      - "6334:6334"
+      - "${QDRANT_PORT:-6333}:6333"
     volumes:
       - qdrant_data:/qdrant/storage
     healthcheck:
-      test: [ "CMD-SHELL", "timeout 2 bash -c '</dev/tcp/localhost/6333' || exit 1" ]
+      test: [ "CMD-SHELL", "bash -c '</dev/tcp/127.0.0.1/6333' || exit 1" ]
       interval: 5s
       timeout: 5s
       retries: 5
-      start_period: 10s
     networks:
       - mvp_global_net
 
@@ -76,6 +42,7 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
+    image: mvp-base:latest
     container_name: mvp_mcp_server
     restart: unless-stopped
     command: [ "python", "src/mcp_code_server.py" ]
@@ -97,27 +64,18 @@ services:
       postgres:
         condition: service_healthy
       qdrant:
-        condition: service_started
+        condition: service_healthy
     networks:
       - mvp_global_net
 
-  sandbox-image:
-    build:
-      context: .
-      dockerfile: Dockerfile.sandbox
-    image: mvp-sandbox:latest
-    container_name: mvp_sandbox_base
-    pull_policy: build
-    restart: "no"
-    network_mode: none
-
-  app:
+  orchestrator-app:
     build:
       context: .
       dockerfile: Dockerfile
     image: mvp-base:latest
     container_name: mvp_orchestrator_app
-    command: [ "pytest", "-q" ]
+    restart: unless-stopped
+    command: [ "python", "-m", "uvicorn", "src.api_server:app", "--host", "0.0.0.0", "--port", "8000" ]
     environment:
       WORKSPACE_ROOT: /workspace
       POSTGRES_HOST: postgres
@@ -125,6 +83,7 @@ services:
       POSTGRES_DB: ${POSTGRES_DB:-mvp_db}
       POSTGRES_USER: ${POSTGRES_USER:-mvp_user}
       POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-mvp_password}
+      DATABASE_URL: postgresql://${POSTGRES_USER:-mvp_user}:${POSTGRES_PASSWORD:-mvp_password}@postgres:5432/${POSTGRES_DB:-mvp_db}
       QDRANT_URL: http://qdrant:6333
       MCP_SERVER_SSE_URL: http://mcp-server:8080/sse
       GEMINI_API_KEY: ${GEMINI_API_KEY}
@@ -132,12 +91,20 @@ services:
       GCP_PROJECT_ID: ${GCP_PROJECT_ID}
       SANDBOX_IMAGE: ${SANDBOX_IMAGE:-mvp-sandbox:latest}
       SANDBOX_TIMEOUT_SEC: ${SANDBOX_TIMEOUT_SEC:-120}
+      DOCKER_NETWORK_NAME: mvp_global_net
       PYTHONPATH: /workspace:/workspace/src
     volumes:
       - .:/workspace
       - /var/run/docker.sock:/var/run/docker.sock
+    ports:
+      - "${API_PORT:-8000}:8000"
     depends_on:
-      - mcp-server
+      postgres:
+        condition: service_healthy
+      qdrant:
+        condition: service_healthy
+      mcp-server:
+        condition: service_started
     networks:
       - mvp_global_net
 
@@ -146,6 +113,9 @@ services:
       context: .
       dockerfile: Dockerfile.sandbox
     image: ${SANDBOX_IMAGE:-mvp-sandbox:latest}
+    pull_policy: build
+    restart: "no"
+    network_mode: none
     profiles:
       - tools
       - sandbox
