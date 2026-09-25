@@ -16,9 +16,6 @@ def configure_test_environment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) 
     monkeypatch.setenv("SANDBOX_IMAGE", "mvp-sandbox:test")
     monkeypatch.setenv("SANDBOX_TIMEOUT_SEC", "15")
 
-    lock_file = tmp_path / "mvp_orchestrator_test.lock"
-    monkeypatch.setattr("orchestrator_graph.LOCK_FILE_PATH", lock_file)
-
 
 @pytest.fixture
 def mock_workspace(tmp_path: Path) -> Path:

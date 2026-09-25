@@ -2,8 +2,12 @@ from __future__ import annotations
 
 import os
 from pathlib import Path
+from unittest.mock import patch
 
-import code_indexer
+from tree_sitter_languages import get_language, get_parser
+
+from src.code_indexer import PythonStructuralIndexer
+from src.db_pool import DatabasePool
 
 
 def test_database_pool_dsn_resolution() -> None:
@@ -12,6 +16,16 @@ def test_database_pool_dsn_resolution() -> None:
     assert "mvp_db" in resolved_dsn
     assert "mvp_user" in resolved_dsn
 
+    with patch("psycopg2.pool.ThreadedConnectionPool") as mock_pool:
+        DatabasePool._pool = None
+        DatabasePool.initialize()
+        mock_pool.assert_called_once_with(
+            minconn=1,
+            maxconn=10,
+            dsn=resolved_dsn,
+        )
+        DatabasePool.close_all()
+
 
 def test_ast_python_symbol_parsing(tmp_path: Path) -> None:
     dummy_source = (
@@ -19,24 +33,19 @@ def test_ast_python_symbol_parsing(tmp_path: Path) -> None:
         "    def calculate_balance(self, user_id: str) -> float:\n"
         "        return 100.0\n"
     )
-    test_file = tmp_path / "dummy_service.py"
-    test_file.write_text(dummy_source, encoding="utf-8")
+    indexer = PythonStructuralIndexer.__new__(PythonStructuralIndexer)
+    indexer.language = get_language("python")
+    indexer.parser = get_parser("python")
 
-    # Parsing is validated without requiring external network connectivity to Qdrant
-    indexer = code_indexer.PythonStructuralIndexer.__new__(code_indexer.PythonStructuralIndexer)
-    indexer.language = code_indexer._load_python_language()
-    indexer.parser = code_indexer._init_python_parser(indexer.language)
-
-    extracted_symbols = indexer.parse_file(
-        project_id="smoke_test",
-        repo_dir=tmp_path,
-        rel_path="dummy_service.py",
+    extracted_symbols, extracted_calls = indexer._extract_symbols_and_calls(
+        file_path="dummy_service.py",
+        code_content=dummy_source,
     )
 
-    symbol_names = {s.name for s in extracted_symbols}
+    symbol_names = {s["name"] for s in extracted_symbols}
     assert "AccountManager" in symbol_names
     assert "calculate_balance" in symbol_names
 
-    function_symbol = next(s for s in extracted_symbols if s.name == "calculate_balance")
-    assert function_symbol.scope_path == "AccountManager"
-    assert function_symbol.symbol_type == "function_definition"
+    function_symbol = next(s for s in extracted_symbols if s["name"] == "calculate_balance")
+    assert function_symbol["symbol_type"] == "function"
+    assert function_symbol["start_line"] == 2

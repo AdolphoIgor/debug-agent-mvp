@@ -4,126 +4,148 @@ import subprocess
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
-import pytest
-
-from sandbox_engine import PythonHermeticSandbox, SandboxExecutionResult
+from src.sandbox_engine import SandboxEngine, SandboxExecutionResult
 
 
-def test_write_test_file_securely_success(mock_workspace: Path) -> None:
-    sandbox = PythonHermeticSandbox(workspace_path=mock_workspace, ticket_id="TCK-101")
-    target_rel_path = "tests/test_generated.py"
-    content = "def test_success():\n    assert 1 == 1\n"
+def test_sandbox_execution_result_properties() -> None:
+    success_res = SandboxExecutionResult(exit_code=0, stdout="OK", stderr="")
+    assert success_res.passed is True
 
-    sandbox.write_test_file_securely(target_rel_path, content)
-
-    created_file = mock_workspace / target_rel_path
-    assert created_file.exists()
-    assert created_file.read_text(encoding="utf-8") == content
-
-
-def test_write_test_file_securely_rejects_path_traversal(mock_workspace: Path) -> None:
-    sandbox = PythonHermeticSandbox(workspace_path=mock_workspace, ticket_id="TCK-102")
-    traversal_path = "../../escaped_test.py"
-
-    with pytest.raises(PermissionError, match="Path traversal attempt detected"):
-        sandbox.write_test_file_securely(traversal_path, "assert True")
-
-
-def test_write_test_file_securely_rejects_git_directory_target(mock_workspace: Path) -> None:
-    sandbox = PythonHermeticSandbox(workspace_path=mock_workspace, ticket_id="TCK-103")
-    forbidden_target = ".git/hooks/pre-commit"
-
-    with pytest.raises(PermissionError, match="Modifications to the .git directory are prohibited"):
-        sandbox.write_test_file_securely(forbidden_target, "#!/bin/sh\nexit 1")
+    fail_res = SandboxExecutionResult(exit_code=1, stdout="", stderr="Error")
+    assert fail_res.passed is False
 
 
 @patch("subprocess.run")
-def test_apply_patch_invokes_git_apply(mock_run: MagicMock, mock_workspace: Path) -> None:
-    sandbox = PythonHermeticSandbox(workspace_path=mock_workspace, ticket_id="TCK-104")
-    patch_diff = (
-        "--- a/main.py\n+++ b/main.py\n@@ -1 +1 @@\n-def run():\n+def run():\n+    return False"
+def test_clean_workspace_runs_git_commands(mock_run: MagicMock, mock_workspace: Path) -> None:
+    engine = SandboxEngine(workspace_path=mock_workspace)
+    engine.clean_workspace()
+
+    assert mock_run.call_count == 2
+    mock_run.assert_any_call(
+        ["git", "reset", "--hard", "HEAD"],
+        cwd=mock_workspace,
+        capture_output=True,
+        check=False,
     )
-
-    mock_run.return_value = subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr="")
-
-    result = sandbox.apply_patch(patch_diff)
-
-    assert result.returncode == 0
-    mock_run.assert_called_once_with(
-        ["git", "apply", "--whitespace=fix", "-"],
-        input=patch_diff,
-        text=True,
-        cwd=str(mock_workspace),
+    mock_run.assert_any_call(
+        ["git", "clean", "-fd"],
+        cwd=mock_workspace,
         capture_output=True,
         check=False,
     )
 
 
+def test_run_tests_rejects_missing_file(mock_workspace: Path) -> None:
+    engine = SandboxEngine(workspace_path=mock_workspace)
+    res = engine.run_tests("tests/non_existent.py")
+
+    assert res.passed is False
+    assert "Test file not found" in res.stderr
+
+
+def test_run_tests_rejects_path_traversal(mock_workspace: Path) -> None:
+    engine = SandboxEngine(workspace_path=mock_workspace)
+    res = engine.run_tests("../../outside.py")
+
+    assert res.passed is False
+    assert "Test file not found" in res.stderr
+
+
 @patch("subprocess.run")
-def test_run_pytest_executes_hermetic_container(mock_run: MagicMock, mock_workspace: Path) -> None:
-    sandbox = PythonHermeticSandbox(
-        workspace_path=mock_workspace,
-        ticket_id="TCK-105",
-        timeout_sec=30,
-    )
+def test_run_tests_patch_apply_failure(mock_run: MagicMock, mock_workspace: Path) -> None:
+    test_file = mock_workspace / "tests" / "test_sample.py"
+    test_file.parent.mkdir(parents=True, exist_ok=True)
+    test_file.write_text("def test_ok(): pass\n", encoding="utf-8")
 
-    mock_run.return_value = subprocess.CompletedProcess(
-        args=[],
-        returncode=0,
-        stdout="1 passed in 0.02s",
-        stderr="",
-    )
+    engine = SandboxEngine(workspace_path=mock_workspace)
 
-    result: SandboxExecutionResult = sandbox.run_pytest(test_file="tests/test_patch.py")
-
-    assert result.returncode == 0
-    assert result.timed_out is False
-    assert "1 passed" in result.stdout
-
-    expected_cmd = [
-        "docker",
-        "run",
-        "--rm",
-        "--network=none",
-        "--cap-drop=ALL",
-        "--security-opt=no-new-privileges:true",
-        "-v",
-        f"{mock_workspace}:/workspace:rw",
-        "-w",
-        "/workspace",
-        "mvp-sandbox:test",
-        "pytest",
-        "-q",
-        "tests/test_patch.py",
+    mock_run.side_effect = [
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=1, stdout="", stderr="Patch failed"),
     ]
-    mock_run.assert_called_once_with(
-        expected_cmd,
-        capture_output=True,
-        text=True,
-        timeout=30,
-        check=False,
-    )
+
+    res = engine.run_tests("tests/test_sample.py", patch_content="corrupt diff")
+
+    assert res.passed is False
+    assert "Failed applying patch" in res.stderr
 
 
 @patch("subprocess.run")
-def test_run_pytest_handles_timeout(mock_run: MagicMock, mock_workspace: Path) -> None:
-    sandbox = PythonHermeticSandbox(workspace_path=mock_workspace, ticket_id="TCK-106")
-    mock_run.side_effect = subprocess.TimeoutExpired(
-        cmd="docker run", timeout=15, output=b"Running..."
-    )
-    result = sandbox.run_pytest()
-    assert result.returncode == -1
-    assert result.timed_out is True
-    assert "exceeded configured timeout" in result.stderr
+def test_run_tests_applies_patch_and_executes_docker(
+    mock_run: MagicMock, mock_workspace: Path
+) -> None:
+    test_file = mock_workspace / "tests" / "test_sample.py"
+    test_file.parent.mkdir(parents=True, exist_ok=True)
+    test_file.write_text("def test_ok(): pass\n", encoding="utf-8")
+
+    engine = SandboxEngine(workspace_path=mock_workspace)
+
+    mock_run.side_effect = [
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="1 passed", stderr=""),
+    ]
+
+    res = engine.run_tests("tests/test_sample.py", patch_content="diff --git ...")
+
+    assert res.passed is True
+    assert "1 passed" in res.stdout
 
 
 @patch("subprocess.run")
-def test_run_pytest_handles_os_error(mock_run: MagicMock, mock_workspace: Path) -> None:
-    sandbox = PythonHermeticSandbox(workspace_path=mock_workspace, ticket_id="TCK-107")
-    mock_run.side_effect = FileNotFoundError("Docker executable not found on host path.")
+def test_run_tests_run_full_suite(mock_run: MagicMock, mock_workspace: Path) -> None:
+    test_file = mock_workspace / "tests" / "test_sample.py"
+    test_file.parent.mkdir(parents=True, exist_ok=True)
+    test_file.write_text("def test_ok(): pass\n", encoding="utf-8")
 
-    result = sandbox.run_pytest()
+    engine = SandboxEngine(workspace_path=mock_workspace)
 
-    assert result.returncode == -1
-    assert result.timed_out is False
-    assert "Container execution failure" in result.stderr
+    mock_run.side_effect = [
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="All passed", stderr=""),
+    ]
+
+    res = engine.run_tests("tests/test_sample.py", run_full_suite=True)
+
+    assert res.passed is True
+    docker_call = mock_run.call_args_list[-1][0][0]
+    assert "tests" in docker_call
+
+
+@patch("subprocess.run")
+def test_run_tests_handles_timeout(mock_run: MagicMock, mock_workspace: Path) -> None:
+    test_file = mock_workspace / "tests" / "test_sample.py"
+    test_file.parent.mkdir(parents=True, exist_ok=True)
+    test_file.write_text("def test_ok(): pass\n", encoding="utf-8")
+
+    engine = SandboxEngine(workspace_path=mock_workspace)
+    mock_run.side_effect = [
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.TimeoutExpired(cmd="docker run", timeout=120),
+    ]
+
+    res = engine.run_tests("tests/test_sample.py")
+    assert res.exit_code == -1
+    assert "Sandbox execution timed out" in res.stderr
+
+
+@patch("subprocess.run")
+def test_run_tests_handles_generic_exception(mock_run: MagicMock, mock_workspace: Path) -> None:
+    test_file = mock_workspace / "tests" / "test_sample.py"
+    test_file.parent.mkdir(parents=True, exist_ok=True)
+    test_file.write_text("def test_ok(): pass\n", encoding="utf-8")
+
+    engine = SandboxEngine(workspace_path=mock_workspace)
+    mock_run.side_effect = [
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        subprocess.CompletedProcess(args=[], returncode=0, stdout="", stderr=""),
+        RuntimeError("Docker daemon connection failed"),
+    ]
+
+    res = engine.run_tests("tests/test_sample.py")
+    assert res.exit_code == 1
+    assert "Sandbox error: Docker daemon connection failed" in res.stderr
